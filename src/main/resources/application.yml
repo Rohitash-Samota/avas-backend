@@ -1,0 +1,94 @@
+debug: false
+
+spring:
+  application:
+    name: avas-backend
+  datasource:
+    # Local defaults intentionally target the persistent AVAS Docker MySQL instance on 3307.
+    # Production must override these values with managed secrets.
+    url: ${DB_URL:${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3307/avas-new?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Kolkata}}
+    username: ${DB_USERNAME:${SPRING_DATASOURCE_USERNAME:avas}}
+    password: ${DB_PASSWORD:${SPRING_DATASOURCE_PASSWORD:avas_local}}
+    hikari:
+      pool-name: avas-mysql-pool
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
+  data:
+    mongodb:
+      # Homebrew MongoDB is the local default and currently runs without authentication.
+      # Docker and production supply an authenticated MONGODB_URI.
+      uri: ${MONGODB_URI:${SPRING_DATA_MONGODB_URI:mongodb://127.0.0.1:27017/avas-new}}
+      auto-index-creation: ${MONGO_AUTO_INDEX:true}
+  jpa:
+    open-in-view: false
+    show-sql: ${JPA_SHOW_SQL:false}
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:update}
+    properties:
+      hibernate:
+        format_sql: ${JPA_FORMAT_SQL:false}
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: always
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  file:
+    path: ${LOG_PATH:./logs}
+  level:
+    org.springframework.web: ${WEB_LOG_LEVEL:INFO}
+    org.hibernate: ${HIBERNATE_LOG_LEVEL:WARN}
+
+avas:
+  identity:
+    # The product specification makes SQL the system of record for users, roles and sessions.
+    # The Mongo identity adapter remains only for compatibility with earlier local snapshots.
+    store: ${IDENTITY_STORE:sql}
+  mongo:
+    enabled: ${MONGO_ENABLED:true}
+  auth:
+    issuer: avas-backend
+    access-token-minutes: ${ACCESS_TOKEN_MINUTES:15}
+    refresh-token-days: ${REFRESH_TOKEN_DAYS:30}
+    jwt-secret: ${JWT_SECRET:}
+    frontend-url: ${FRONTEND_URL:http://localhost:3000}
+    google:
+      enabled: ${GOOGLE_OAUTH_ENABLED:false}
+      client-id: ${GOOGLE_CLIENT_ID:}
+      client-secret: ${GOOGLE_CLIENT_SECRET:}
+  commerce:
+    test-mode: ${COMMERCE_TEST_MODE:true}
+    razorpay:
+      key-id: ${RAZORPAY_KEY_ID:}
+      key-secret: ${RAZORPAY_KEY_SECRET:}
+      api-url: ${RAZORPAY_API_URL:https://api.razorpay.com/v1}
+  bootstrap-admin:
+    enabled: ${AVAS_BOOTSTRAP_ADMIN_ENABLED:false}
+    first-name: ${AVAS_BOOTSTRAP_ADMIN_FIRST_NAME:Platform}
+    last-name: ${AVAS_BOOTSTRAP_ADMIN_LAST_NAME:Administrator}
+    username: ${AVAS_BOOTSTRAP_ADMIN_USERNAME:platform.admin}
+    email: ${AVAS_BOOTSTRAP_ADMIN_EMAIL:}
+    mobile-number: ${AVAS_BOOTSTRAP_ADMIN_MOBILE:}
+    password: ${AVAS_BOOTSTRAP_ADMIN_PASSWORD:}
+    tenant-id: ${AVAS_BOOTSTRAP_ADMIN_TENANT_ID:tenant-production}
+  versions:
+    rules: RJ-JDA-2026.08
+    knowledge: AVAS-KB-2026.08
+    strategy: layout-heuristic-1.4.2
+    estimate-policy: planning-estimate-1.2.0

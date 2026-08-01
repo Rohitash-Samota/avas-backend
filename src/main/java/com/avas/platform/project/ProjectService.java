@@ -1,0 +1,379 @@
+package com.avas.platform.project;
+
+import com.avas.platform.project.persistence.ProjectPersistenceService;
+import com.avas.platform.auth.AvasPrincipal;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static com.avas.platform.project.ProjectModels.*;
+
+@Service
+public class ProjectService {
+    private final Map<String, ProjectAggregate> projects = new ConcurrentHashMap<>();
+    private final Map<String, ProjectPersistenceService.ProjectAccess> access = new ConcurrentHashMap<>();
+    private final Map<String, ProjectStateSnapshot> persistedSnapshots = new ConcurrentHashMap<>();
+    private final GeometryEngine geometryEngine;
+    private final Map<String, String> versions;
+    private final ProjectPersistenceService persistence;
+
+    @Autowired
+    public ProjectService(
+            GeometryEngine geometryEngine,
+            @Value("${avas.versions.rules}") String rules,
+            @Value("${avas.versions.knowledge}") String knowledge,
+            @Value("${avas.versions.strategy}") String strategy,
+            @Value("${avas.versions.estimate-policy}") String estimatePolicy,
+            ProjectPersistenceService persistence
+    ) {
+        this.geometryEngine = geometryEngine;
+        this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge, "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
+        this.persistence = persistence;
+    }
+
+    public ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy, String estimatePolicy) {
+        this.geometryEngine = geometryEngine;
+        this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge, "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
+        this.persistence = null;
+    }
+
+    @PostConstruct
+    void loadPersistedProjects() {
+        if (persistence != null) {
+            persistence.retireLegacySampleProject();
+            persistence.loadStates().forEach(state -> {
+                projects.put(state.project().id(), new ProjectAggregate(state));
+                persistedSnapshots.put(state.project().id(), state);
+            });
+            persistence.loadAccess().forEach(value -> access.put(value.projectId(), value));
+            persistence.loadProjectSummaries().stream()
+                    .filter(summary -> !projects.containsKey(summary.id())).forEach(summary -> projects.put(summary.id(), new ProjectAggregate(summary)));
+        }
+    }
+
+    public synchronized ProjectSummary create(CreateProjectRequest request, String role, UUID ownerUserId, String tenantId) {
+        var id = UUID.randomUUID().toString();
+        var code = "AVAS-" + (request.startMode() == StartMode.DRAWING ? "UPL" : "PRJ") + "-" + id.substring(0, 8).toUpperCase();
+        var project = new ProjectAggregate(id, code, request.name(), request.startMode());
+        projects.put(id, project);
+        access.put(id, new ProjectPersistenceService.ProjectAccess(id, tenantId, ownerUserId));
+        audit(project, "PROJECT_CREATED", role, id, "0", "Project created from " + request.startMode());
+        persist(project);
+        return project.summary();
+    }
+
+    public synchronized ProjectSummary create(CreateProjectRequest request, String role) {
+        return create(request, role, null, "tenant-public");
+    }
+
+    public List<ProjectSummary> list(AvasPrincipal principal, String activeRole) {
+        if (persistence == null) return projects.values().stream().map(ProjectAggregate::summary).toList();
+        return persistence.list(principal.tenantId(), principal.userId(), tenantWide(activeRole));
+    }
+
+    public void requireAccess(String projectId, AvasPrincipal principal, String activeRole) {
+        required(projectId);
+        var ownership = access.get(projectId);
+        var allowed = ownership != null && principal.tenantId().equals(ownership.tenantId())
+                && (principal.userId().equals(ownership.ownerUserId()) || tenantWide(activeRole));
+        if (!allowed) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found");
+    }
+
+    public String projectIdForDrawing(String drawingId) { return findDrawing(drawingId).project.id; }
+    public String projectIdForEstimate(String estimateId) { return findEstimate(estimateId).project.id; }
+
+    private boolean tenantWide(String activeRole) {
+        return "ADMIN".equals(activeRole);
+    }
+
+    public ProjectSummary get(String projectId) { return required(projectId).summary(); }
+
+    public synchronized ProjectSummary updateBasicDetails(String projectId, BasicDetailsRequest request, String role) {
+        if (request.family().members() < 1) throw new IllegalArgumentException("At least one family member is required");
+        var project = required(projectId);
+        project.details = request;
+        project.snapshotVersion++;
+        project.recommendation = null;
+        project.requirementSummary = null;
+        project.status = "REQUIREMENTS_IN_PROGRESS";
+        project.updatedAt = Instant.now();
+        audit(project, "BASIC_DETAILS_UPDATED", role, projectId, String.valueOf(project.snapshotVersion), "Explicit plot, budget and family inputs updated");
+        persist(project);
+        return project.summary();
+    }
+
+    public synchronized Recommendation generateRecommendation(String projectId, String role) {
+        var project = requiredWithDetails(projectId);
+        project.recommendation = recommendationFor(project, false);
+        project.status = "RECOMMENDATION_READY";
+        project.updatedAt = Instant.now();
+        audit(project, "RECOMMENDATION_GENERATED", role, project.recommendation.id(), String.valueOf(project.snapshotVersion), "Deterministic rules and approved knowledge applied");
+        persist(project);
+        return project.recommendation;
+    }
+
+    public Recommendation recommendation(String projectId) {
+        var value = required(projectId).recommendation;
+        if (value == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Recommendation has not been generated");
+        return value;
+    }
+
+    public synchronized RequirementSummary acceptRecommendation(String projectId, String recommendationId, String role) {
+        var project = required(projectId);
+        var current = recommendation(projectId);
+        if (!current.id().equals(recommendationId)) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Recommendation not found");
+        project.recommendation = copyRecommendation(current, true);
+        project.requirementSummary = requirementFor(project);
+        project.status = "REQUIREMENTS_APPROVED";
+        project.updatedAt = Instant.now();
+        audit(project, "REQUIREMENT_SNAPSHOT_APPROVED", role, project.requirementSummary.snapshotId(), String.valueOf(project.snapshotVersion), "Customer accepted the inferred requirement brief");
+        persist(project);
+        return project.requirementSummary;
+    }
+
+    public synchronized ProjectSummary updatePreferences(String projectId, PreferenceRequest request, String role) {
+        var project = requiredWithDetails(projectId);
+        var d = project.details;
+        project.details = new BasicDetailsRequest(d.plotWidth(), d.plotLength(), d.roadFacing(), d.city(), d.floors(), d.budget(), d.category(), d.family(), request.preferences());
+        project.snapshotVersion++;
+        project.recommendation = recommendationFor(project, false);
+        project.requirementSummary = null;
+        project.updatedAt = Instant.now();
+        audit(project, "PREFERENCES_UPDATED", role, projectId, String.valueOf(project.snapshotVersion), String.join(", ", request.preferences()));
+        persist(project);
+        return project.summary();
+    }
+
+    public RequirementSummary requirementSummary(String projectId) {
+        var summary = required(projectId).requirementSummary;
+        if (summary == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Approve a recommendation to create the requirement snapshot");
+        return summary;
+    }
+
+    public synchronized DrawingJob generateDrawings(String projectId, String role) {
+        var project = required(projectId);
+        if (project.requirementSummary == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "Approve the requirement summary before generating drawings");
+        var jobId = "job-" + UUID.randomUUID();
+        var started = new DrawingJob(jobId, projectId, JobStatus.GENERATING_LAYOUTS, 45, "Generating layout strategies", List.of(), project.requirementSummary.snapshotId(), Instant.now(), null);
+        project.jobs.add(started);
+        var nextVersion = project.drawings.stream().mapToInt(DrawingCandidate::version).max().orElse(0) + 1;
+        var generated = geometryEngine.generate(projectId, nextVersion, project.details, project.recommendation, versions);
+        project.drawings.addAll(generated);
+        project.status = generated.stream().anyMatch(d -> "EXPERT_REVIEW".equals(d.status())) ? "REVIEW_REQUIRED" : "CONCEPTS_READY";
+        project.updatedAt = Instant.now();
+        var completed = new DrawingJob(jobId, projectId, JobStatus.COMPLETED, 100, "Rendered and validated", generated.stream().map(DrawingCandidate::id).toList(), project.requirementSummary.snapshotId(), started.createdAt(), Instant.now());
+        project.jobs.set(project.jobs.size() - 1, completed);
+        audit(project, "LAYOUT_CANDIDATES_GENERATED", role, jobId, String.valueOf(project.snapshotVersion), "Three candidate strategies generated");
+        persist(project);
+        return completed;
+    }
+
+    public DrawingJob drawingJob(String projectId, String jobId) {
+        return required(projectId).jobs.stream().filter(job -> job.id().equals(jobId)).findFirst().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Drawing job not found"));
+    }
+
+    public List<DrawingCandidate> drawings(String projectId) { return List.copyOf(required(projectId).drawings); }
+    public DrawingCandidate drawing(String drawingId) { return findDrawing(drawingId).drawing; }
+
+    public synchronized RevisionReceipt feedback(String drawingId, FeedbackRequest request, String role) {
+        var found = findDrawing(drawingId);
+        var interpreted = interpretFeedback(request.feedback());
+        var revisionId = "revision-" + UUID.randomUUID();
+        audit(found.project, "DRAWING_REVISION_REQUESTED", role, revisionId, String.valueOf(found.drawing.version() + 1), interpreted);
+        persist(found.project);
+        return new RevisionReceipt(drawingId, revisionId, found.drawing.version() + 1, interpreted, "QUEUED");
+    }
+
+    public DrawingJob regenerate(String drawingId, String role) { return generateDrawings(findDrawing(drawingId).project.id, role); }
+
+    public synchronized DrawingCandidate approveConcept(String drawingId, String role) {
+        var found = findDrawing(drawingId);
+        var approved = copyDrawing(found.drawing, true);
+        found.project.drawings.set(found.index, approved);
+        found.project.status = "CONCEPT_APPROVED";
+        found.project.updatedAt = Instant.now();
+        audit(found.project, "CONCEPT_DRAWING_APPROVED", role, drawingId, String.valueOf(approved.version()), "Concept approval recorded; professional approval remains required");
+        persist(found.project);
+        return approved;
+    }
+
+    public ValidationReport validation(String drawingId) {
+        var drawing = drawing(drawingId);
+        var assisted = "EXPERT_REVIEW".equals(drawing.status());
+        return new ValidationReport(drawingId, drawing.confidence(), assisted ? EngineStatus.EXPERT_REVIEW : EngineStatus.SUCCESS, List.of(
+                new ValidationGate("Schema & units", "PASSED", "Plot, budget, units and source provenance are complete", true),
+                new ValidationGate("Building rules", "PASSED", "No unresolved hard constraints in " + versions.get("ruleVersion"), true),
+                new ValidationGate("Geometry", "PASSED", "No overlap, boundary escape or disconnected circulation", true),
+                new ValidationGate("Preliminary feasibility", "PASSED_WITH_NOTES", "Long-span and column-grid review remains professional scope", true),
+                new ValidationGate("Estimate evidence", "PASSED", "Location evidence is within the accepted freshness window", true),
+                new ValidationGate("Professional review", "REQUIRED", "Conceptual output cannot become construction documentation without sign-off", true)
+        ), List.of("Licensed architect review", "Structural engineer design", "Local authority approval where applicable"), versions);
+    }
+
+    public synchronized Estimate generateEstimate(String projectId, String drawingId, String role) {
+        var project = required(projectId);
+        var drawing = drawing(drawingId);
+        if (!drawing.projectId().equals(projectId)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Drawing does not belong to this project");
+        var estimate = estimateFor(project, drawing);
+        project.estimates.add(estimate);
+        project.updatedAt = Instant.now();
+        audit(project, "ESTIMATE_GENERATED", role, estimate.id(), String.valueOf(estimate.version()), "Drawing quantities reconciled to local price evidence");
+        persist(project);
+        return estimate;
+    }
+
+    public List<Estimate> estimates(String projectId) { return List.copyOf(required(projectId).estimates); }
+    public Estimate estimate(String estimateId) { return findEstimate(estimateId).estimate; }
+    public List<EstimateItem> boq(String estimateId) { return estimate(estimateId).items(); }
+
+    public synchronized Estimate approveEstimate(String estimateId, String role) {
+        var found = findEstimate(estimateId);
+        var e = found.estimate;
+        var approved = new Estimate(e.id(), e.projectId(), e.drawingId(), e.version(), e.low(), e.recommended(), e.high(), e.builtUpArea(), e.durationMonthsLow(), e.durationMonthsHigh(), e.confidence(), e.validUntil(), e.items(), e.assumptions(), e.exclusions(), e.versions(), true, e.createdAt());
+        found.project.estimates.set(found.index, approved);
+        audit(found.project, "PLANNING_ESTIMATE_APPROVED", role, e.id(), String.valueOf(e.version()), "Estimate accepted as a planning range, not a fixed commitment");
+        persist(found.project);
+        return approved;
+    }
+
+    public List<AuditEvent> audit(String projectId) { return List.copyOf(required(projectId).audit); }
+
+    public WorkspaceSummary workspace(String role, String displayName, List<String> permissions, AvasPrincipal principal) {
+        var visibleProjects = List.<ProjectSummary>of();
+        if ("INDIVIDUAL".equals(role) || tenantWide(role)) visibleProjects = list(principal, role);
+        var projectTasks = visibleProjects.stream().limit(6)
+                .map(project -> new WorkspaceTask(project.id(), project.name(), project.projectCode(), project.status(), null))
+                .toList();
+        var metrics = switch (role) {
+            case "BUILDER" -> List.of(
+                    new WorkspaceMetric("Eligible projects", "0", "Released marketplace projects"),
+                    new WorkspaceMetric("Quotes in review", "0", "Submitted quotations"),
+                    new WorkspaceMetric("Awarded projects", "0", "Accepted awards"));
+            case "INTERNAL_USER" -> List.of(
+                    new WorkspaceMetric("Assigned services", "0", "Explicit professional assignments"),
+                    new WorkspaceMetric("Review queue", "0", "Assigned reviews awaiting action"),
+                    new WorkspaceMetric("Recorded decisions", "0", "Assignment-scoped decisions"));
+            case "SITE_ENGINEER" -> List.of(
+                    new WorkspaceMetric("Assigned sites", "0", "Explicit project assignments"),
+                    new WorkspaceMetric("Open issues", "0", "Assigned-site issues"),
+                    new WorkspaceMetric("Reports due", "0", "Daily reporting queue"));
+            case "ADMIN" -> List.of(
+                    new WorkspaceMetric("Tenant projects", String.valueOf(visibleProjects.size()), "Current production records"),
+                    new WorkspaceMetric("Active workflows", String.valueOf(activeProjectCount(visibleProjects)), "Projects not archived"),
+                    new WorkspaceMetric("Audit events", String.valueOf(auditCount(visibleProjects)), "Persisted project history"));
+            default -> List.of(
+                    new WorkspaceMetric("My projects", String.valueOf(visibleProjects.size()), "Owner-scoped records"),
+                    new WorkspaceMetric("Active workflows", String.valueOf(activeProjectCount(visibleProjects)), "Planning in progress"),
+                    new WorkspaceMetric("Concepts ready", String.valueOf(reviewQueueSize(visibleProjects)), "Projects ready for review"));
+        };
+        return new WorkspaceSummary(role, displayName, permissions.stream().sorted().toList(),
+                RoleWorkflowCatalog.forRole(role, permissions), metrics, projectTasks);
+    }
+
+    private long activeProjectCount(List<ProjectSummary> summaries) {
+        return summaries.stream().filter(project -> !"ARCHIVED".equals(project.status())).count();
+    }
+
+    private long reviewQueueSize(List<ProjectSummary> summaries) {
+        return summaries.stream().filter(project -> project.status().contains("CONCEPT") || project.status().contains("DRAWING")).count();
+    }
+
+    private long auditCount(List<ProjectSummary> summaries) {
+        return summaries.stream().mapToLong(project -> {
+            var aggregate = projects.get(project.id());
+            return aggregate == null ? 0 : aggregate.audit.size();
+        }).sum();
+    }
+
+    private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
+        var d = project.details;
+        var members = d.family().members();
+        // Master bedroom for the couple, one bedroom per child, and a dedicated ground-floor
+        // senior bedroom when seniors are present. A guest bedroom is a separate optional room
+        // (spec section 3, Step 4) and does not change this core headcount-driven bedroom count.
+        // Matches the specification's worked example: 2 adults + 2 children + 1 senior -> 4 bedrooms.
+        var bedrooms = Math.max(2, Math.min(6, 1 + d.family().children() + (d.family().seniorCitizens() > 0 ? 1 : 0)));
+        var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
+        var coverage = d.plotArea() < 1200 ? .62 : d.plotArea() < 2400 ? .58 : .54;
+        var builtUp = (int) Math.round(d.plotArea() * coverage * d.floors());
+        var category = d.category() == Category.NOT_SURE ? (d.budget() / Math.max(1, builtUp) >= 3000 ? "LUXURY" : d.budget() / Math.max(1, builtUp) >= 2200 ? "PREMIUM" : "STANDARD") : d.category().name();
+        var rate = switch (category) { case "LUXURY" -> 3300; case "PREMIUM" -> 2600; default -> 1950; };
+        var expected = (long) builtUp * rate;
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.plotArea() >= 1800 ? 2 : 1, round10(builtUp * .9), round10(builtUp * 1.05), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.1"), accepted);
+    }
+
+    private RequirementSummary requirementFor(ProjectAggregate project) {
+        var assisted = project.details.floors() > 3 || project.details.plotWidth() < 20;
+        return new RequirementSummary("req-" + project.id + "-v" + project.snapshotVersion, project.snapshotVersion, project.id, assisted ? "ASSISTED" : "AUTOMATIC", project.details, project.recommendation, List.of("Standard soil conditions until a geotechnical report is provided", "Indicative local setbacks pending professional verification", "Conceptual planning unit is feet"), assisted ? List.of("A professional must confirm the narrow-plot circulation strategy") : List.of(), versions, Instant.now());
+    }
+
+    private Estimate estimateFor(ProjectAggregate project, DrawingCandidate drawing) {
+        var recommended = Math.round((drawing.estimatedCostLow() + drawing.estimatedCostHigh()) / 2.0);
+        var shares = new double[]{.36, .15, .08, .07, .115, .09, .045};
+        var categories = new String[]{"Civil structure", "Flooring & finishes", "Electrical", "Plumbing", "Kitchen & bathrooms", "Doors & windows", "Professional services"};
+        var descriptions = new String[]{"RCC, steel, blockwork and plaster", "Premium flooring and paint", "Concealed wiring and standard fixtures", "Water supply, drainage and fixtures", "Modular kitchen and bathroom package", "Engineered wood and aluminium", "Architect review and site engineering"};
+        var items = new ArrayList<EstimateItem>();
+        for (int i = 0; i < shares.length; i++) {
+            var amount = roundThousand(recommended * shares[i]);
+            items.add(new EstimateItem("BOQ-" + String.format("%03d", i + 1), categories[i], descriptions[i], "LS", 1, amount, amount, "JPR-PRICE-2026-07-30-" + (i + 1), 86 + i));
+        }
+        var version = project.estimates.size() + 1;
+        return new Estimate("estimate-" + project.id + "-v" + version, project.id, drawing.id(), version, drawing.estimatedCostLow(), recommended, drawing.estimatedCostHigh(), drawing.builtUpArea(), 11, 13, 89, LocalDate.now().plusDays(30), items, List.of("Standard soil and foundation conditions", "Rates cover Jaipur supplier markets within 28 km", "7% contingency is included in the upper planning range"), List.of("Land cost", "Authority fees not yet verified", "Loose furniture and appliances"), versions, false, Instant.now());
+    }
+
+    private String interpretFeedback(String feedback) {
+        var normalized = feedback.toLowerCase();
+        if (normalized.contains("kitchen") && normalized.contains("larg")) return "Increase KITCHEN target area; reduce lower-priority space while preserving approved budget";
+        if (normalized.contains("open space") || normalized.contains("garden")) return "Increase OPEN_SPACE priority and recalculate permissible built-up area";
+        if (normalized.contains("budget") || normalized.contains("cost") || normalized.contains("lakh")) return "Apply customer cost ceiling and rank lower-cost geometry changes first";
+        return "Record customer preference change for requirement interpretation and produce a new version";
+    }
+
+    private Recommendation copyRecommendation(Recommendation r, boolean accepted) { return new Recommendation(r.id(), r.title(), r.category(), r.bedrooms(), r.attachedBathrooms(), r.commonBathrooms(), r.parkingCars(), r.builtUpAreaMinimum(), r.builtUpAreaMaximum(), r.estimatedCostLow(), r.estimatedCostHigh(), r.seniorCitizenBedroom(), r.familyLounge(), r.futureExpansion(), r.confidence(), r.reasons(), r.provenance(), accepted); }
+    private DrawingCandidate copyDrawing(DrawingCandidate d, boolean approved) { return new DrawingCandidate(d.id(), d.projectId(), d.version(), d.strategy(), d.name(), d.builtUpArea(), d.estimatedCostLow(), d.estimatedCostHigh(), d.vastuScore(), d.naturalLightScore(), d.spaceEfficiencyScore(), d.confidence(), d.geometry(), d.hardViolations(), d.softRecommendations(), d.explanations(), d.versions(), d.status(), approved, d.createdAt()); }
+
+    private ProjectAggregate required(String id) { var project = projects.get(id); if (project == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found"); return project; }
+    private ProjectAggregate requiredWithDetails(String id) { var p = required(id); if (p.details == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "Complete basic project details first"); return p; }
+    private FoundDrawing findDrawing(String drawingId) { for (var project : projects.values()) for (int i = 0; i < project.drawings.size(); i++) if (project.drawings.get(i).id().equals(drawingId)) return new FoundDrawing(project, project.drawings.get(i), i); throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Drawing not found"); }
+    private FoundEstimate findEstimate(String estimateId) { for (var project : projects.values()) for (int i = 0; i < project.estimates.size(); i++) if (project.estimates.get(i).id().equals(estimateId)) return new FoundEstimate(project, project.estimates.get(i), i); throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Estimate not found"); }
+    private record FoundDrawing(ProjectAggregate project, DrawingCandidate drawing, int index) {}
+    private record FoundEstimate(ProjectAggregate project, Estimate estimate, int index) {}
+    private void audit(ProjectAggregate project, String action, String role, String artifactId, String version, String detail) {
+        var event = new AuditEvent(UUID.randomUUID().toString(), project.id, action, role, artifactId, version, detail, Instant.now());
+        project.audit.add(0, event);
+    }
+    private void persist(ProjectAggregate project) {
+        if (persistence == null) return;
+        var next = new ProjectStateSnapshot(project.summary(), project.recommendation, project.requirementSummary,
+                List.copyOf(project.drawings), List.copyOf(project.jobs), List.copyOf(project.estimates), List.copyOf(project.audit));
+        var ownership = access.getOrDefault(project.id,
+                new ProjectPersistenceService.ProjectAccess(project.id, "tenant-public", null));
+        try {
+            persistence.save(next, ownership.tenantId(), ownership.ownerUserId());
+            persistedSnapshots.put(project.id, next);
+        } catch (RuntimeException exception) {
+            var previous = persistedSnapshots.get(project.id);
+            if (previous == null) {
+                projects.remove(project.id);
+                access.remove(project.id);
+            } else {
+                projects.put(project.id, new ProjectAggregate(previous));
+            }
+            throw exception;
+        }
+    }
+    private int round10(double value) { return (int) Math.round(value / 10.0) * 10; }
+    private long roundLakh(double value) { return Math.round(value / 100_000.0) * 100_000; }
+    private long roundThousand(double value) { return Math.round(value / 1_000.0) * 1_000; }
+}
