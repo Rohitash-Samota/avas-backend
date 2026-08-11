@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(java -version)",
+      "Bash(mvn -version)",
+      "Bash(mvn -q -DskipTests compile)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://127.0.0.1:8090/actuator/health --max-time 5)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://127.0.0.1:8090/api/v1 --max-time 5)",
+      "Bash(lsof -iTCP:8090 -sTCP:LISTEN -P -n)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://0.0.0.0:8090/actuator/health --max-time 5)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://[::1]:8090/actuator/health --max-time 5)",
+      "Bash(docker rm *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/actuator/health)",
+      "Bash(curl -s http://localhost:8080/actuator/health)"
+    ]
+  }
+}
