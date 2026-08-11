@@ -44,8 +44,17 @@ class FloorPlanPdfServiceTest {
                     .contains("GARDEN THRESHOLD")
                     .contains("SELECTED CONCEPT")
                     .contains("AUTHORITATIVE FLOOR PLAN MAP")
+                    .contains("GROUND FLOOR PLAN")
+                    .contains("2 FLOORS REQUESTED")
+                    .contains("Ground-floor geometry shown; upper floors require separate layouts")
+                    .contains("Ground shown | 2 floors requested")
                     .contains("Living Room")
                     .contains("ALL DIMENSIONS IN FEET")
+                    .contains("NORTH-FACING ROAD / ACCESS")
+                    .contains("PLAN HIGHLIGHTS")
+                    .contains("EST. BUILD COST")
+                    .contains("ORIENTATION")
+                    .contains("SERVER VECTOR RENDER")
                     .contains("No generative AI model")
                     .contains("AVAS deterministic layout engine")
                     .contains("layout-heuristic-1.4.2")
@@ -68,8 +77,32 @@ class FloorPlanPdfServiceTest {
                 .hasMessageContaining("geometry");
     }
 
+    @Test
+    void annotatesTheRoadEdgeUsingThePersistedProjectFacing() throws Exception {
+        var project = projects.create(new CreateProjectRequest("West-facing home", StartMode.PLOT), "INDIVIDUAL");
+        projects.updateBasicDetails(project.id(), details(Facing.WEST), "INDIVIDUAL");
+        var recommendation = projects.generateRecommendation(project.id(), "INDIVIDUAL");
+        projects.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        projects.generateDrawings(project.id(), "INDIVIDUAL");
+        var drawing = projects.drawings(project.id()).getFirst();
+
+        var bytes = pdf.generate(projects.get(project.id()), drawing);
+
+        try (var document = Loader.loadPDF(bytes)) {
+            assertThat(document.getNumberOfPages()).isEqualTo(1);
+            assertThat(document.getPage(0).getResources().getXObjectNames()).isEmpty();
+            assertThat(new PDFTextStripper().getText(document))
+                    .contains("WEST-FACING ROAD / ACCESS")
+                    .contains("West facing");
+        }
+    }
+
     private BasicDetailsRequest details() {
-        return new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur, Rajasthan", 2, 7_000_000,
+        return details(Facing.NORTH);
+    }
+
+    private BasicDetailsRequest details(Facing facing) {
+        return new BasicDetailsRequest(40, 60, facing, "Jaipur, Rajasthan", 2, 7_000_000,
                 Category.PREMIUM, new FamilyDetails(2, 2, 1, true),
                 List.of("Vastu-friendly", "Family lounge", "Future expansion"));
     }

@@ -8,6 +8,7 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import org.apache.pdfbox.util.Matrix;
 import org.springframework.stereotype.Service;
 
 import java.awt.Color;
@@ -34,6 +35,9 @@ public class FloorPlanPdfService {
     private static final Color LINE = new Color(225, 217, 205);
     private static final Color PAPER = new Color(250, 248, 244);
     private static final Color MINT = new Color(231, 235, 222);
+    private static final Color WALL = new Color(49, 45, 40);
+    private static final Color FIXTURE = new Color(151, 137, 118);
+    private static final Color WINDOW = new Color(63, 109, 140);
     private static final Color[] ROOM_COLORS = {
             new Color(242, 225, 200), new Color(232, 222, 208), new Color(233, 228, 219),
             new Color(229, 229, 224), new Color(220, 232, 210), new Color(239, 227, 212)
@@ -101,15 +105,16 @@ public class FloorPlanPdfService {
         line(canvas, LINE, .8f, 36, 784, 559, 784);
 
         text(canvas, BOLD, 25, INK, ellipsize(drawing.name().toUpperCase(Locale.ROOT), 34), 36, 750);
+        var requestedFloors = project.details().floors();
         text(canvas, BOLD, 7, CORAL,
-                "AVAS CONCEPTUAL PLAN  |  " + grouped(drawing.builtUpArea()) + " SQ FT INDICATIVE BUILT-UP AREA", 36, 735);
+                "AVAS CONCEPTUAL PLAN  |  " + grouped(drawing.builtUpArea()) + " SQ FT TOTAL BUILT-UP  |  "
+                        + requestedFloors + " FLOOR" + (requestedFloors == 1 ? "" : "S") + " REQUESTED", 36, 735);
         text(canvas, REGULAR, 7, MUTED,
-                "Structured geometry rendered for planning, comparison and preliminary estimation.", 36, 722);
+                "Ground-floor geometry shown; upper floors require separate layouts and professional review.", 36, 722);
         selectionBadge(canvas, drawing.conceptApproved(), 438, 737, 121, 31);
 
-        renderSidebar(canvas, project, drawing, 36, 303, 120, 395);
-        renderPlan(canvas, drawing, 170, 303, 389, 395);
-        renderSummaryCards(canvas, project, drawing);
+        renderPlan(canvas, project, drawing, 36, 180, 523, 527);
+        renderCompactSummary(canvas, project, drawing, 36, 105, 523, 62);
         renderDisclaimer(canvas, project, drawing);
     }
 
@@ -186,26 +191,28 @@ public class FloorPlanPdfService {
         return y - 14;
     }
 
-    private void renderPlan(PDPageContentStream canvas, DrawingCandidate drawing,
+    private void renderPlan(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
             float panelX, float panelY, float panelWidth, float panelHeight) throws IOException {
         fill(canvas, Color.WHITE, panelX, panelY, panelWidth, panelHeight);
         stroke(canvas, LINE, .7f, panelX, panelY, panelWidth, panelHeight);
         var geometry = drawing.geometry();
-        var topReserved = 23f;
-        var bottomReserved = 23f;
-        var availableWidth = panelWidth - 32;
-        var availableHeight = panelHeight - topReserved - bottomReserved - 22;
+        var topReserved = 44f;
+        var bottomReserved = 38f;
+        var availableWidth = panelWidth - 56;
+        var availableHeight = panelHeight - topReserved - bottomReserved;
         var scale = (float) Math.min(availableWidth / geometry.plotWidth(), availableHeight / geometry.plotLength());
         var plotWidth = (float) geometry.plotWidth() * scale;
         var plotHeight = (float) geometry.plotLength() * scale;
         var originX = panelX + (panelWidth - plotWidth) / 2;
         var originY = panelY + bottomReserved + (availableHeight - plotHeight) / 2;
 
-        text(canvas, BOLD, 6.2f, CORAL, "AUTHORITATIVE FLOOR PLAN MAP", panelX + 12, panelY + panelHeight - 16);
+        text(canvas, BOLD, 6.2f, CORAL, "AUTHORITATIVE FLOOR PLAN MAP", panelX + 12,
+                panelY + panelHeight - 16);
+        text(canvas, BOLD, 10, INK, "GROUND FLOOR PLAN", panelX + 12, panelY + panelHeight - 29);
         textRight(canvas, REGULAR, 5.8f, MUTED, "ALL DIMENSIONS IN FEET", panelX + panelWidth - 12,
                 panelY + panelHeight - 16);
         fill(canvas, new Color(253, 252, 249), originX, originY, plotWidth, plotHeight);
-        stroke(canvas, INK, 1f, originX, originY, plotWidth, plotHeight);
+        stroke(canvas, WALL, 1.1f, originX, originY, plotWidth, plotHeight);
 
         for (int index = 0; index < geometry.rooms().size(); index++) {
             var room = geometry.rooms().get(index);
@@ -214,20 +221,137 @@ public class FloorPlanPdfService {
             var roomWidth = (float) room.width() * scale;
             var roomHeight = (float) room.length() * scale;
             fill(canvas, ROOM_COLORS[index % ROOM_COLORS.length], roomX, roomY, roomWidth, roomHeight);
-            stroke(canvas, INK, .65f, roomX, roomY, roomWidth, roomHeight);
-            var label = titleCase(room.type());
-            var fontSize = Math.max(4.2f, Math.min(7.2f, roomWidth / Math.max(6, label.length()) * 1.35f));
-            if (roomWidth > 25 && roomHeight > 18) {
-                textCentered(canvas, BOLD, fontSize, INK, ellipsize(label, 19), roomX + roomWidth / 2,
-                        roomY + roomHeight / 2 + 2);
-                textCentered(canvas, REGULAR, Math.max(4f, fontSize - 1.5f), MUTED,
-                        oneDecimal(room.width()) + " ft x " + oneDecimal(room.length()) + " ft",
-                        roomX + roomWidth / 2, roomY + roomHeight / 2 - 7);
-            }
+            stroke(canvas, WALL, 1.15f, roomX, roomY, roomWidth, roomHeight);
+            renderRoomFixture(canvas, room, roomX, roomY, roomWidth, roomHeight);
+            renderRoomLabel(canvas, room, roomX, roomY, roomWidth, roomHeight);
         }
+        renderBuildingEnvelope(canvas, geometry.rooms(), originX, originY, scale, geometry.plotLength());
         renderOpenings(canvas, geometry.doors(), geometry.windows(), originX, originY, scale,
                 geometry.plotLength());
-        renderPlanAnnotations(canvas, drawing, panelX, panelY, panelWidth, originX, originY, plotWidth, plotHeight);
+        renderPlanAnnotations(canvas, project, drawing, panelX, panelY, panelWidth, panelHeight,
+                originX, originY, plotWidth, plotHeight);
+    }
+
+    private void renderRoomLabel(PDPageContentStream canvas, RoomGeometry room,
+            float roomX, float roomY, float roomWidth, float roomHeight) throws IOException {
+        if (roomWidth < 18 || roomHeight < 18) return;
+        var label = titleCase(room.type());
+        var fontSize = Math.min(7.4f, roomHeight * .12f);
+        while (fontSize > 5.2f && textWidth(BOLD, fontSize, label) > roomWidth - 8) fontSize -= .2f;
+        if (textWidth(BOLD, fontSize, label) > roomWidth - 6) label = compactRoomLabel(room.type());
+
+        var labelY = roomY + roomHeight * .39f;
+        textCentered(canvas, BOLD, fontSize, INK, label, roomX + roomWidth / 2, labelY);
+        var dimensions = oneDecimal(room.width()) + " ft x " + oneDecimal(room.length()) + " ft";
+        var dimensionSize = Math.max(4.6f, fontSize - 1.7f);
+        if (roomHeight >= 34 && textWidth(REGULAR, dimensionSize, dimensions) <= roomWidth - 6) {
+            textCentered(canvas, REGULAR, dimensionSize, MUTED, dimensions,
+                    roomX + roomWidth / 2, labelY - Math.max(7, fontSize + 1));
+        }
+    }
+
+    private String compactRoomLabel(String type) {
+        return switch (type == null ? "" : type) {
+            case "LIVING_ROOM" -> "Living";
+            case "SENIOR_BEDROOM" -> "Bedroom";
+            case "STAIRCASE" -> "Stairs";
+            case "BATHROOM" -> "Bath";
+            default -> fitCharacters(titleCase(type), 9);
+        };
+    }
+
+    private String fitCharacters(String value, int maximum) {
+        var safe = safe(value);
+        return safe.length() <= maximum ? safe : safe.substring(0, maximum);
+    }
+
+    private void renderRoomFixture(PDPageContentStream canvas, RoomGeometry room,
+            float roomX, float roomY, float roomWidth, float roomHeight) throws IOException {
+        if (roomWidth < 30 || roomHeight < 30) return;
+        var type = room.type() == null ? "" : room.type();
+        var centerX = roomX + roomWidth / 2;
+        var fixtureY = roomY + roomHeight * .63f;
+        canvas.setStrokingColor(FIXTURE);
+        canvas.setLineWidth(.45f);
+
+        if (type.contains("PARKING")) {
+            var width = Math.min(34, roomWidth * .42f);
+            var height = Math.min(54, roomHeight * .27f);
+            var x = centerX - width / 2;
+            var y = fixtureY;
+            stroke(canvas, FIXTURE, .55f, x, y, width, height);
+            line(canvas, FIXTURE, .4f, x + 5, y + height * .28f, x + width - 5, y + height * .28f);
+            line(canvas, FIXTURE, .4f, x + 5, y + height * .72f, x + width - 5, y + height * .72f);
+            line(canvas, FIXTURE, 1.4f, x - 2, y + 8, x - 2, y + 18);
+            line(canvas, FIXTURE, 1.4f, x + width + 2, y + 8, x + width + 2, y + 18);
+            line(canvas, FIXTURE, 1.4f, x - 2, y + height - 18, x - 2, y + height - 8);
+            line(canvas, FIXTURE, 1.4f, x + width + 2, y + height - 18, x + width + 2, y + height - 8);
+        } else if (type.contains("LIVING")) {
+            var width = Math.min(76, roomWidth * .58f);
+            var height = Math.min(18, roomHeight * .14f);
+            var x = centerX - width / 2;
+            stroke(canvas, FIXTURE, .55f, x, fixtureY, width, height);
+            line(canvas, FIXTURE, .4f, x + width / 3, fixtureY, x + width / 3, fixtureY + height);
+            line(canvas, FIXTURE, .4f, x + width * 2 / 3, fixtureY, x + width * 2 / 3, fixtureY + height);
+            circle(canvas, FIXTURE, .45f, centerX, fixtureY - 9, Math.min(8, width * .12f));
+        } else if (type.contains("BEDROOM")) {
+            var width = Math.min(58, roomWidth * .55f);
+            var height = Math.min(42, roomHeight * .28f);
+            var x = centerX - width / 2;
+            stroke(canvas, FIXTURE, .55f, x, fixtureY, width, height);
+            line(canvas, FIXTURE, .45f, x, fixtureY + height - 10, x + width, fixtureY + height - 10);
+            stroke(canvas, FIXTURE, .35f, x + 4, fixtureY + height - 8, width / 2 - 6, 6);
+            stroke(canvas, FIXTURE, .35f, centerX + 2, fixtureY + height - 8, width / 2 - 6, 6);
+        } else if (type.contains("DINING")) {
+            var width = Math.min(46, roomWidth * .58f);
+            var height = Math.min(20, roomHeight * .2f);
+            var x = centerX - width / 2;
+            stroke(canvas, FIXTURE, .55f, x, fixtureY, width, height);
+            for (var chairX : new float[]{x + width * .2f, centerX, x + width * .8f}) {
+                circle(canvas, FIXTURE, .4f, chairX, fixtureY - 4, 2.2f);
+                circle(canvas, FIXTURE, .4f, chairX, fixtureY + height + 4, 2.2f);
+            }
+        } else if (type.contains("KITCHEN")) {
+            var left = roomX + 6;
+            var right = roomX + roomWidth - 6;
+            var top = roomY + roomHeight - 7;
+            line(canvas, FIXTURE, 2.2f, left, top, right, top);
+            line(canvas, FIXTURE, 2.2f, right, top, right, roomY + roomHeight * .58f);
+            stroke(canvas, FIXTURE, .45f, centerX - 7, top - 4, 14, 6);
+        } else if (type.contains("STAIR")) {
+            var left = roomX + 7;
+            var right = roomX + roomWidth - 7;
+            var start = roomY + roomHeight * .58f;
+            var step = Math.max(3, Math.min(5, roomHeight * .045f));
+            for (var index = 0; index < 6; index++) {
+                var y = start + index * step;
+                if (y > roomY + roomHeight - 5) break;
+                line(canvas, FIXTURE, .45f, left, y, right, y);
+            }
+            line(canvas, FIXTURE, .7f, centerX, start, centerX, Math.min(roomY + roomHeight - 5, start + step * 5));
+        } else if (type.contains("BATH") || type.contains("TOILET")) {
+            var radius = Math.min(7, Math.min(roomWidth, roomHeight) * .15f);
+            circle(canvas, FIXTURE, .5f, centerX, fixtureY + radius, radius);
+            stroke(canvas, FIXTURE, .45f, centerX - radius, fixtureY + radius * 2, radius * 2, 5);
+        } else if (type.contains("UTILITY")) {
+            var size = Math.min(21, Math.min(roomWidth, roomHeight) * .3f);
+            stroke(canvas, FIXTURE, .5f, centerX - size / 2, fixtureY, size, size);
+            circle(canvas, FIXTURE, .45f, centerX, fixtureY + size / 2, size * .32f);
+        }
+    }
+
+    private void renderBuildingEnvelope(PDPageContentStream canvas, List<RoomGeometry> rooms,
+            float originX, float originY, float scale, double plotLength) throws IOException {
+        if (rooms == null || rooms.isEmpty()) return;
+        var minimumX = rooms.stream().mapToDouble(RoomGeometry::x).min().orElse(0);
+        var maximumX = rooms.stream().mapToDouble(room -> room.x() + room.width()).max().orElse(0);
+        var minimumY = rooms.stream().mapToDouble(RoomGeometry::y).min().orElse(0);
+        var maximumY = rooms.stream().mapToDouble(room -> room.y() + room.length()).max().orElse(0);
+        var x = originX + (float) minimumX * scale;
+        var y = originY + (float) (plotLength - maximumY) * scale;
+        var width = (float) (maximumX - minimumX) * scale;
+        var height = (float) (maximumY - minimumY) * scale;
+        stroke(canvas, WALL, 2.25f, x, y, width, height);
     }
 
     private void renderOpenings(PDPageContentStream canvas, List<Map<String, Object>> doors,
@@ -241,11 +365,22 @@ public class FloorPlanPdfService {
             var startX = originX + (float) (x - width / 2) * scale;
             var endX = originX + (float) (x + width / 2) * scale;
             var pointY = originY + (float) (plotLength - y) * scale;
+            line(canvas, Color.WHITE, 3.1f, startX, pointY, endX, pointY);
             canvas.setStrokingColor(CORAL);
-            canvas.setLineWidth(.75f);
-            canvas.moveTo(startX, pointY);
-            canvas.curveTo(startX + (endX - startX) * .25f, pointY + (endX - startX) * .55f,
-                    startX + (endX - startX) * .72f, pointY + (endX - startX) * .55f, endX, pointY);
+            canvas.setLineWidth(.7f);
+            var radius = endX - startX;
+            var opensRight = !"RIGHT".equalsIgnoreCase(String.valueOf(door.get("swing")));
+            if (opensRight) {
+                line(canvas, CORAL, .8f, startX, pointY, startX, pointY + radius);
+                canvas.moveTo(endX, pointY);
+                canvas.curveTo(endX, pointY + radius * .55f, startX + radius * .55f, pointY + radius,
+                        startX, pointY + radius);
+            } else {
+                line(canvas, CORAL, .8f, endX, pointY, endX, pointY + radius);
+                canvas.moveTo(startX, pointY);
+                canvas.curveTo(startX, pointY + radius * .55f, endX - radius * .55f, pointY + radius,
+                        endX, pointY + radius);
+            }
             canvas.stroke();
         }
         for (var window : windows == null ? List.<Map<String, Object>>of() : windows) {
@@ -256,26 +391,105 @@ public class FloorPlanPdfService {
             var pointX = originX + (float) x * scale;
             var fromY = originY + (float) (plotLength - y - width / 2) * scale;
             var toY = originY + (float) (plotLength - y + width / 2) * scale;
-            line(canvas, new Color(63, 109, 140), 1.3f, pointX, fromY, pointX, toY);
+            line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
+            line(canvas, WINDOW, .8f, pointX - 1.1f, fromY, pointX - 1.1f, toY);
+            line(canvas, WINDOW, .8f, pointX + 1.1f, fromY, pointX + 1.1f, toY);
+            line(canvas, WINDOW, .45f, pointX - 2.2f, fromY, pointX + 2.2f, fromY);
+            line(canvas, WINDOW, .45f, pointX - 2.2f, toY, pointX + 2.2f, toY);
         }
     }
 
-    private void renderPlanAnnotations(PDPageContentStream canvas, DrawingCandidate drawing,
-            float panelX, float panelY, float panelWidth, float originX, float originY, float plotWidth,
-            float plotHeight) throws IOException {
-        textCentered(canvas, REGULAR, 5.5f, MUTED,
-                oneDecimal(drawing.geometry().plotWidth()) + " ft plot width", originX + plotWidth / 2,
-                originY + plotHeight + 8);
-        text(canvas, REGULAR, 5.5f, MUTED,
-                oneDecimal(drawing.geometry().plotLength()) + " ft plot length", panelX + 8, originY + plotHeight / 2);
+    private void renderPlanAnnotations(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            float panelX, float panelY, float panelWidth, float panelHeight, float originX, float originY,
+            float plotWidth, float plotHeight) throws IOException {
+        dimensionHorizontal(canvas, originX, originX + plotWidth, originY + plotHeight + 8,
+                oneDecimal(drawing.geometry().plotWidth()) + " ft plot width");
+        dimensionVertical(canvas, originX - 11, originY, originY + plotHeight,
+                oneDecimal(drawing.geometry().plotLength()) + " ft plot length");
         var northX = panelX + panelWidth - 23;
-        var northY = panelY + 27;
+        var northY = panelY + panelHeight - 63;
         line(canvas, INK, 1f, northX, northY, northX, northY + 16);
         line(canvas, INK, 1f, northX, northY + 16, northX - 4, northY + 10);
         line(canvas, INK, 1f, northX, northY + 16, northX + 4, northY + 10);
         textCentered(canvas, BOLD, 6, INK, "N", northX, northY - 8);
-        line(canvas, MUTED, .7f, originX, originY - 10, originX + Math.min(55, plotWidth * .35f), originY - 10);
-        text(canvas, REGULAR, 5, MUTED, "ROAD / ACCESS EDGE", originX + 60, originY - 12);
+
+        var facing = project.details().roadFacing();
+        switch (facing) {
+            case NORTH -> line(canvas, CORAL, 2.2f, originX, originY + plotHeight, originX + plotWidth,
+                    originY + plotHeight);
+            case SOUTH -> line(canvas, CORAL, 2.2f, originX, originY, originX + plotWidth, originY);
+            case EAST -> line(canvas, CORAL, 2.2f, originX + plotWidth, originY, originX + plotWidth,
+                    originY + plotHeight);
+            case WEST -> line(canvas, CORAL, 2.2f, originX, originY, originX, originY + plotHeight);
+        }
+        text(canvas, BOLD, 5.6f, CORAL,
+                facing.name() + "-FACING ROAD / ACCESS", panelX + 12, panelY + 11);
+        textRight(canvas, REGULAR, 5.3f, MUTED,
+                grouped(drawing.builtUpArea()) + " SQ FT TOTAL BUILT-UP (" + project.details().floors()
+                        + " FLOOR" + (project.details().floors() == 1 ? "" : "S") + ")", panelX + panelWidth - 12,
+                panelY + 11);
+    }
+
+    private void dimensionHorizontal(PDPageContentStream canvas, float fromX, float toX, float y, String label)
+            throws IOException {
+        line(canvas, MUTED, .45f, fromX, y, toX, y);
+        line(canvas, MUTED, .45f, fromX, y - 3, fromX, y + 3);
+        line(canvas, MUTED, .45f, toX, y - 3, toX, y + 3);
+        fill(canvas, Color.WHITE, (fromX + toX) / 2 - 31, y - 3, 62, 7);
+        textCentered(canvas, REGULAR, 5.2f, MUTED, label, (fromX + toX) / 2, y - 1);
+    }
+
+    private void dimensionVertical(PDPageContentStream canvas, float x, float fromY, float toY, String label)
+            throws IOException {
+        line(canvas, MUTED, .45f, x, fromY, x, toY);
+        line(canvas, MUTED, .45f, x - 3, fromY, x + 3, fromY);
+        line(canvas, MUTED, .45f, x - 3, toY, x + 3, toY);
+        textRotated(canvas, REGULAR, 5.2f, MUTED, label, x - 4, (fromY + toY) / 2, 90);
+    }
+
+    private void renderCompactSummary(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            float x, float y, float width, float height) throws IOException {
+        fill(canvas, Color.WHITE, x, y, width, height);
+        stroke(canvas, LINE, .7f, x, y, width, height);
+        var provenanceHeight = 20f;
+        var firstWidth = 225f;
+        var secondWidth = 132f;
+        line(canvas, LINE, .55f, x, y + provenanceHeight, x + width, y + provenanceHeight);
+        line(canvas, LINE, .55f, x + firstWidth, y + provenanceHeight, x + firstWidth, y + height);
+        line(canvas, LINE, .55f, x + firstWidth + secondWidth, y + provenanceHeight,
+                x + firstWidth + secondWidth, y + height);
+
+        var rooms = drawing.geometry().rooms();
+        var bedrooms = rooms.stream().filter(room -> room.type().contains("BEDROOM")).count();
+        var bathrooms = rooms.stream().filter(room -> room.type().contains("BATH")
+                || room.type().contains("TOILET")).count();
+        summaryCell(canvas, "PLAN HIGHLIGHTS",
+                bedrooms + " bedroom" + (bedrooms == 1 ? "" : "s") + " | " + bathrooms + " bathroom"
+                        + (bathrooms == 1 ? "" : "s"),
+                rooms.size() + " placed spaces | Ground shown | " + project.details().floors() + " floor"
+                        + (project.details().floors() == 1 ? "" : "s") + " requested", x, y + provenanceHeight,
+                firstWidth, height - provenanceHeight);
+        summaryCell(canvas, "EST. BUILD COST", lakhRange(drawing), "Planning range",
+                x + firstWidth, y + provenanceHeight, secondWidth, height - provenanceHeight);
+        summaryCell(canvas, "ORIENTATION", titleCase(project.details().roadFacing().name()) + " facing",
+                geometryFloors(drawing), x + firstWidth + secondWidth, y + provenanceHeight,
+                width - firstWidth - secondWidth, height - provenanceHeight);
+
+        fill(canvas, PAPER, x + 1, y + 1, width - 2, provenanceHeight - 1);
+        text(canvas, BOLD, 4.8f, CORAL, "SERVER VECTOR RENDER", x + 9, y + 7);
+        var versions = versions(drawing);
+        var provenance = versions.getOrDefault("generationModel", "Not recorded") + " | "
+                + versions.getOrDefault("generator", "Not recorded") + " | "
+                + versions.getOrDefault("strategyVersion", "Not recorded");
+        text(canvas, REGULAR, 4.8f, MUTED, provenance, x + 78, y + 7);
+    }
+
+    private void summaryCell(PDPageContentStream canvas, String heading, String value, String detail,
+            float x, float y, float width, float height) throws IOException {
+        text(canvas, BOLD, 5.2f, CORAL, heading, x + 10, y + height - 13);
+        text(canvas, BOLD, 7.2f, INK, fitWidth(value, BOLD, 7.2f, width - 20), x + 10, y + height - 26);
+        text(canvas, REGULAR, 5.2f, MUTED, fitWidth(detail, REGULAR, 5.2f, width - 20),
+                x + 10, y + height - 36);
     }
 
     private void renderSummaryCards(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing)
@@ -352,25 +566,25 @@ public class FloorPlanPdfService {
 
     private void renderDisclaimer(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing)
             throws IOException {
-        fill(canvas, INK, 36, 62, 523, 70);
-        text(canvas, BOLD, 7, new Color(235, 193, 137), "AVAS CONCEPTUAL PLAN", 49, 114);
+        fill(canvas, INK, 36, 47, 523, 45);
+        text(canvas, BOLD, 6.3f, new Color(235, 193, 137), "AVAS CONCEPTUAL PLAN", 49, 78);
         var warning = "This plan is generated for planning and estimation. It must be reviewed by a qualified "
                 + "architect and structural engineer before construction.";
-        var lines = wrap(warning, REGULAR, 6.8f, 480);
-        var y = 99f;
-        for (var value : lines) { text(canvas, REGULAR, 6.8f, Color.WHITE, value, 49, y); y -= 10; }
+        var lines = wrap(warning, REGULAR, 5.8f, 498);
+        var y = 66f;
+        for (var value : lines) { text(canvas, REGULAR, 5.8f, Color.WHITE, value, 49, y); y -= 8; }
         var reviewNote = firstOrDefault(drawing.softRecommendations(), "Professional review is required.");
-        text(canvas, REGULAR, 5.2f, new Color(205, 197, 185),
-                "Review note: " + fitWidth(reviewNote, REGULAR, 5.2f, 470), 49, 78);
-        text(canvas, REGULAR, 5.2f, new Color(205, 197, 185),
-                "Warnings: " + sizeOf(drawing.softRecommendations()) + "  |  Hard errors: "
-                        + sizeOf(drawing.hardViolations()) + "  |  Professional review: REQUIRED", 49, 68);
+        text(canvas, REGULAR, 4.7f, new Color(205, 197, 185),
+                "Review: " + fitWidth(reviewNote, REGULAR, 4.7f, 360), 49, 54);
+        textRight(canvas, BOLD, 4.7f, new Color(235, 193, 137),
+                "WARNINGS " + sizeOf(drawing.softRecommendations()) + " | HARD ERRORS "
+                        + sizeOf(drawing.hardViolations()) + " | REVIEW REQUIRED", 546, 54);
 
-        text(canvas, BOLD, 7, INK, "AVAS", 36, 42);
+        text(canvas, BOLD, 7, INK, "AVAS", 36, 28);
         text(canvas, REGULAR, 5.3f, MUTED,
                 safe(project.projectCode() + "  |  Drawing v" + drawing.version() + "  |  "
-                        + titleCase(drawing.strategy())), 78, 42);
-        textRight(canvas, REGULAR, 5.3f, MUTED, "Design smarter. Validate before building.", 559, 42);
+                        + titleCase(drawing.strategy())), 78, 28);
+        textRight(canvas, REGULAR, 5.3f, MUTED, "Design smarter. Validate before building.", 559, 28);
     }
 
     private void fill(PDPageContentStream canvas, Color color, float x, float y, float width, float height)
@@ -397,6 +611,24 @@ public class FloorPlanPdfService {
         canvas.stroke();
     }
 
+    private void circle(PDPageContentStream canvas, Color color, float lineWidth,
+            float centerX, float centerY, float radius) throws IOException {
+        var control = radius * .55228475f;
+        canvas.setStrokingColor(color);
+        canvas.setLineWidth(lineWidth);
+        canvas.moveTo(centerX + radius, centerY);
+        canvas.curveTo(centerX + radius, centerY + control, centerX + control, centerY + radius,
+                centerX, centerY + radius);
+        canvas.curveTo(centerX - control, centerY + radius, centerX - radius, centerY + control,
+                centerX - radius, centerY);
+        canvas.curveTo(centerX - radius, centerY - control, centerX - control, centerY - radius,
+                centerX, centerY - radius);
+        canvas.curveTo(centerX + control, centerY - radius, centerX + radius, centerY - control,
+                centerX + radius, centerY);
+        canvas.closePath();
+        canvas.stroke();
+    }
+
     private void text(PDPageContentStream canvas, PDFont font, float size, Color color,
             String value, float x, float y) throws IOException {
         canvas.beginText();
@@ -417,6 +649,18 @@ public class FloorPlanPdfService {
             String value, float center, float y) throws IOException {
         var safe = safe(value);
         text(canvas, font, size, color, safe, center - textWidth(font, size, safe) / 2, y);
+    }
+
+    private void textRotated(PDPageContentStream canvas, PDFont font, float size, Color color,
+            String value, float x, float centerY, float degrees) throws IOException {
+        var safe = safe(value);
+        canvas.beginText();
+        canvas.setFont(font, size);
+        canvas.setNonStrokingColor(color);
+        canvas.setTextMatrix(Matrix.getRotateInstance((float) Math.toRadians(degrees), x, centerY));
+        canvas.newLineAtOffset(-textWidth(font, size, safe) / 2, 0);
+        canvas.showText(safe);
+        canvas.endText();
     }
 
     private float textWidth(PDFont font, float size, String value) throws IOException {
