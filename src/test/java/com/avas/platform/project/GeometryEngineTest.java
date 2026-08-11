@@ -12,35 +12,135 @@ class GeometryEngineTest {
     private final GeometryEngine engine = new GeometryEngine();
 
     @Test
-    void generatesThreeVersionedCandidatesWithoutGeometryViolations() {
-        var candidates = engine.generate("project-1", 3, details(40), recommendation(), versions());
+    void generatesCompleteStableGeometryForOneTwoAndThreeFloors() {
+        for (var floors : List.of(1, 2, 3)) {
+            var candidates = engine.generate("project-" + floors, 3, details(40, floors), recommendation(), versions());
 
-        assertThat(candidates).hasSize(3);
-        assertThat(candidates).extracting(DrawingCandidate::id)
-                .containsExactly("drawing-project-1-v3-1", "drawing-project-1-v3-2", "drawing-project-1-v3-3");
-        assertThat(candidates).extracting(DrawingCandidate::strategy)
-                .containsExactly("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
-        assertThat(candidates).allSatisfy(candidate -> {
-            assertThat(candidate.hardViolations()).isEmpty();
-            assertThat(engine.validate(40, 60, candidate.geometry().rooms())).isEmpty();
-            assertThat(candidate.geometry().doors()).hasSameSizeAs(candidate.geometry().rooms());
-            assertThat(candidate.geometry().windows()).hasSameSizeAs(candidate.geometry().rooms());
-            assertThat(candidate.versions())
-                    .containsEntry("generator", "AVAS deterministic layout engine")
-                    .containsEntry("generationModel", "No generative AI model")
-                    .containsEntry("strategyId", candidate.strategy())
-                    .containsKeys("optimizerSeed", "ruleVersion", "strategyVersion");
-        });
+            assertThat(candidates).hasSize(3);
+            assertThat(candidates).extracting(DrawingCandidate::strategy)
+                    .containsExactly("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
+            assertThat(candidates).allSatisfy(candidate -> {
+                var geometry = candidate.geometry();
+                assertThat(candidate.hardViolations()).isNotEmpty()
+                        .allMatch(value -> value.startsWith("Programme gap:"));
+                assertThat(candidate.hardViolations())
+                        .contains("Programme gap: " + (floors == 1 ? 0 : 1)
+                                + " of 3 recommended attached bathrooms represented");
+                if (floors == 1) {
+                    assertThat(candidate.hardViolations())
+                            .contains("Programme gap: recommended family lounge is not represented")
+                            .contains("Programme gap: recommended future-expansion zone is not represented");
+                }
+                assertThat(engine.validate(40, 60, geometry.rooms())).isEmpty();
+                assertThat(engine.validateDocument(floors, geometry.rooms(), geometry.doors(), geometry.windows()))
+                        .isEmpty();
+                assertThat(geometry.rooms()).hasSizeGreaterThanOrEqualTo(8 * floors);
+                assertThat(geometry.doors()).hasSize(geometry.rooms().size() - floors + 1);
+                assertThat(geometry.windows()).isNotEmpty().hasSizeLessThanOrEqualTo(geometry.rooms().size());
+                assertThat(geometry.rooms()).extracting(RoomGeometry::id).doesNotHaveDuplicates();
+                assertThat(geometry.doors()).extracting(opening -> opening.get("id")).doesNotHaveDuplicates();
+                assertThat(geometry.windows()).extracting(opening -> opening.get("id")).doesNotHaveDuplicates();
+                var roomIds = geometry.rooms().stream().map(RoomGeometry::id).toList();
+                assertThat(geometry.doors().stream().map(opening -> String.valueOf(opening.get("roomId"))))
+                        .allMatch(roomIds::contains);
+                assertThat(geometry.rooms().stream().map(RoomGeometry::floor).distinct())
+                        .containsExactlyElementsOf(List.of("GROUND", "FIRST", "SECOND").subList(0, floors));
+                for (var floor : List.of("GROUND", "FIRST", "SECOND").subList(0, floors)) {
+                    assertThat(geometry.rooms().stream().filter(room -> floor.equals(room.floor())))
+                            .hasSizeGreaterThanOrEqualTo(8);
+                }
+                assertThat(geometry.rooms().stream().filter(room -> room.type().contains("BEDROOM")))
+                        .hasSize(recommendation().bedrooms());
+                assertThat(geometry.rooms()).anySatisfy(room -> {
+                    assertThat(room.floor()).isEqualTo("GROUND");
+                    assertThat(room.type()).isEqualTo("SENIOR_BEDROOM");
+                });
+                assertThat(geometry.rooms().stream().filter(room -> room.type().equals("STAIRCASE")))
+                        .hasSize(floors);
+                assertThat(geometry.rooms().stream().filter(room -> room.type().equals("STAIRCASE"))
+                        .map(room -> List.of(room.x(), room.y(), room.width(), room.length())).distinct())
+                        .hasSize(1);
+                if (floors == 1) {
+                    assertThat(geometry.rooms()).extracting(RoomGeometry::type)
+                            .contains("PARKING", "LIVING_ROOM", "DINING", "KITCHEN", "BATHROOM");
+                }
+                assertThat(candidate.versions())
+                        .containsEntry("generator", "AVAS deterministic layout engine")
+                        .containsEntry("generationModel", "No generative AI model")
+                        .containsEntry("geometrySchemaVersion", "multi-floor-1")
+                        .containsEntry("requestedFloors", String.valueOf(floors))
+                        .containsEntry("roadFacing", "NORTH")
+                        .containsEntry("strategyId", candidate.strategy())
+                        .containsKeys("optimizerSeed", "ruleVersion", "strategyVersion");
+            });
+
+            assertThat(candidates).allSatisfy(candidate -> assertThat(candidate.builtUpArea()).isEqualTo(
+                    (int) Math.round(candidate.geometry().rooms().stream().mapToDouble(RoomGeometry::area).sum())));
+            var balanced = candidates.get(1);
+            if (floors > 1) {
+                assertThat(widthOf(balanced, "GROUND", 1)).isNotEqualTo(widthOf(balanced, "FIRST", 1));
+            }
+            var repeated = engine.generate("project-" + floors, 3, details(40, floors),
+                    recommendation(), versions()).getFirst();
+            assertThat(repeated.geometry().rooms()).extracting(RoomGeometry::id)
+                    .containsExactlyElementsOf(candidates.getFirst().geometry().rooms().stream()
+                            .map(RoomGeometry::id).toList());
+            assertThat(repeated.geometry().doors()).extracting(opening -> opening.get("id"))
+                    .containsExactlyElementsOf(candidates.getFirst().geometry().doors().stream()
+                            .map(opening -> opening.get("id")).toList());
+        }
     }
 
     @Test
     void routesNarrowPlotsToExpertReview() {
-        var candidates = engine.generate("narrow", 1, details(18), recommendation(), versions());
+        var candidates = engine.generate("narrow", 1, details(18, 2), recommendation(), versions());
         assertThat(candidates).allSatisfy(candidate -> assertThat(candidate.status()).isEqualTo("EXPERT_REVIEW"));
     }
 
-    private BasicDetailsRequest details(double width) {
-        return new BasicDetailsRequest(width, 60, Facing.NORTH, "Jaipur", 2, 7_000_000,
+    @Test
+    void rejectsOrphanedWrongFloorAndOffPerimeterOpenings() {
+        var drawing = engine.generate("project-openings", 1, details(40, 2), recommendation(), versions()).getFirst();
+        var doors = new java.util.ArrayList<>(drawing.geometry().doors());
+
+        var orphan = new java.util.LinkedHashMap<>(doors.get(0));
+        orphan.put("id", "BROKEN-ORPHAN");
+        orphan.put("roomId", "missing-room");
+        doors.set(0, Map.copyOf(orphan));
+        var offPerimeter = new java.util.LinkedHashMap<>(doors.get(1));
+        offPerimeter.put("id", "BROKEN-PERIMETER");
+        offPerimeter.put("floor", "SECOND");
+        offPerimeter.put("x", -10);
+        offPerimeter.put("width", 100);
+        doors.set(1, Map.copyOf(offPerimeter));
+        var duplicate = new java.util.LinkedHashMap<>(doors.get(2));
+        duplicate.put("id", "BROKEN-DUPLICATE");
+        doors.add(Map.copyOf(duplicate));
+        var windows = new java.util.ArrayList<>(drawing.geometry().windows());
+        var internalWindow = new java.util.LinkedHashMap<>(windows.getFirst());
+        var windowRoom = drawing.geometry().rooms().stream()
+                .filter(room -> room.id().equals(internalWindow.get("roomId"))).findFirst().orElseThrow();
+        internalWindow.put("orientation", "SOUTH");
+        internalWindow.put("x", windowRoom.x() + windowRoom.width() / 2);
+        internalWindow.put("y", windowRoom.y() + windowRoom.length());
+        windows.set(0, Map.copyOf(internalWindow));
+
+        assertThat(engine.validateDocument(2, drawing.geometry().rooms(), doors, windows))
+                .anyMatch(value -> value.contains("references missing room"))
+                .anyMatch(value -> value.contains("not on the same floor"))
+                .anyMatch(value -> value.contains("invalid width"))
+                .anyMatch(value -> value.contains("not contained by the referenced room perimeter"))
+                .anyMatch(value -> value.contains("Duplicate door on shared room edge"))
+                .anyMatch(value -> value.contains("window") && value.contains("exterior building envelope"));
+    }
+
+    private double widthOf(DrawingCandidate drawing, String floor, int roomNumber) {
+        return drawing.geometry().rooms().stream()
+                .filter(room -> room.id().equals(("GROUND".equals(floor) ? "G" : "F1") + "-R" + roomNumber))
+                .findFirst().orElseThrow().width();
+    }
+
+    private BasicDetailsRequest details(double width, int floors) {
+        return new BasicDetailsRequest(width, 60, Facing.NORTH, "Jaipur", floors, 7_000_000,
                 Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
     }
 

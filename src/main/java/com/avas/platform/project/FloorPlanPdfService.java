@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.Map;
 
 import static com.avas.platform.project.ProjectModels.DrawingCandidate;
+import static com.avas.platform.project.ProjectModels.Facing;
 import static com.avas.platform.project.ProjectModels.ProjectSummary;
 import static com.avas.platform.project.ProjectModels.RoomGeometry;
 
@@ -46,11 +47,14 @@ public class FloorPlanPdfService {
     public byte[] generate(ProjectSummary project, DrawingCandidate drawing) {
         validate(project, drawing);
         try (var document = new PDDocument(); var output = new ByteArrayOutputStream()) {
-            var page = new PDPage(PDRectangle.A4);
-            document.addPage(page);
             setMetadata(document.getDocumentInformation(), project, drawing);
-            try (var canvas = new PDPageContentStream(document, page)) {
-                render(canvas, project, drawing);
+            var floors = floorKeys(drawing);
+            for (var index = 0; index < floors.size(); index++) {
+                var page = new PDPage(PDRectangle.A4);
+                document.addPage(page);
+                try (var canvas = new PDPageContentStream(document, page)) {
+                    render(canvas, project, drawing, floors.get(index), index + 1, floors.size());
+                }
             }
             document.save(output);
             return output.toByteArray();
@@ -79,6 +83,14 @@ public class FloorPlanPdfService {
                 throw new IllegalArgumentException("Drawing contains invalid room geometry: " + room.id());
             }
         }
+        if ("multi-floor-1".equals(versions(drawing).get("geometrySchemaVersion"))) {
+            var represented = floorKeys(drawing);
+            var expected = expectedFloorKeys(requestedFloorCount(project, drawing));
+            if (!represented.equals(expected)) {
+                throw new IllegalArgumentException("Multi-floor geometry is incomplete: expected " + expected
+                        + " but found " + represented);
+            }
+        }
     }
 
     private boolean finitePositive(double value) {
@@ -96,26 +108,38 @@ public class FloorPlanPdfService {
         info.setProducer("Apache PDFBox");
     }
 
-    private void render(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing) throws IOException {
+    private void render(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            String floor, int sheetNumber, int sheetCount) throws IOException {
         fill(canvas, Color.WHITE, 0, 0, PDRectangle.A4.getWidth(), PDRectangle.A4.getHeight());
 
         text(canvas, BOLD, 16, INK, "AVAS", 36, 804);
         text(canvas, REGULAR, 5.5f, MUTED, "ADAPTIVE HOME PLANNING", 36, 794);
-        textRight(canvas, REGULAR, 6, MUTED, "SERVER-GENERATED CONCEPT SHEET", 559, 802);
+        textRight(canvas, REGULAR, 6, MUTED,
+                "SERVER-GENERATED FLOOR SET  |  SHEET " + sheetNumber + " OF " + sheetCount, 559, 802);
         line(canvas, LINE, .8f, 36, 784, 559, 784);
 
         text(canvas, BOLD, 25, INK, ellipsize(drawing.name().toUpperCase(Locale.ROOT), 34), 36, 750);
-        var requestedFloors = project.details().floors();
-        text(canvas, BOLD, 7, CORAL,
-                "AVAS CONCEPTUAL PLAN  |  " + grouped(drawing.builtUpArea()) + " SQ FT TOTAL BUILT-UP  |  "
-                        + requestedFloors + " FLOOR" + (requestedFloors == 1 ? "" : "S") + " REQUESTED", 36, 735);
-        text(canvas, REGULAR, 7, MUTED,
-                "Ground-floor geometry shown; upper floors require separate layouts and professional review.", 36, 722);
+        var requestedFloors = requestedFloorCount(project, drawing);
+        text(canvas, BOLD, 6.6f, CORAL,
+                "TOTAL BUILT-UP EST. " + grouped(drawing.builtUpArea()) + " SQ FT  |  "
+                        + requestedFloors + "-FLOOR "
+                        + (legacyIncomplete(project, drawing) ? "LEGACY SET" : "COMPLETE SET"), 36, 735);
+        var floorRooms = roomsForFloor(drawing, floor);
+        var floorDoors = openingsForFloor(drawing.geometry().doors(), floor);
+        var floorWindows = openingsForFloor(drawing.geometry().windows(), floor);
+        var floorDetail = floorTitle(floor) + " geometry  |  " + floorRooms.size() + " spaces  |  "
+                + floorDoors.size() + " doors  |  " + floorWindows.size() + " windows";
+        if (legacyIncomplete(project, drawing)) {
+            floorDetail = "LEGACY INCOMPLETE FLOOR SET  |  " + sheetCount + " OF " + requestedFloors
+                    + " REQUESTED FLOORS AVAILABLE  |  REGENERATE REQUIRED";
+        }
+        text(canvas, REGULAR, 7, legacyIncomplete(project, drawing) ? CORAL : MUTED,
+                fitWidth(floorDetail, REGULAR, 7, 523), 36, 722);
         selectionBadge(canvas, drawing.conceptApproved(), 438, 737, 121, 31);
 
-        renderPlan(canvas, project, drawing, 36, 180, 523, 527);
-        renderCompactSummary(canvas, project, drawing, 36, 105, 523, 62);
-        renderDisclaimer(canvas, project, drawing);
+        renderPlan(canvas, project, drawing, floor, sheetNumber, sheetCount, 36, 180, 523, 527);
+        renderCompactSummary(canvas, project, drawing, floor, sheetNumber, sheetCount, 36, 105, 523, 62);
+        renderDisclaimer(canvas, project, drawing, floor, sheetNumber, sheetCount);
     }
 
     private void selectionBadge(PDPageContentStream canvas, boolean selected, float x, float y, float width, float height)
@@ -145,7 +169,7 @@ public class FloorPlanPdfService {
         cursor = bullet(canvas, bedrooms + " bedroom" + (bedrooms == 1 ? "" : "s"), x + 10, cursor);
         cursor = bullet(canvas, bathrooms + " bathroom" + (bathrooms == 1 ? "" : "s"), x + 10, cursor);
         cursor = bullet(canvas, drawing.geometry().rooms().size() + " placed spaces", x + 10, cursor);
-        cursor = bullet(canvas, titleCase(project.details().roadFacing().name()) + " facing", x + 10, cursor);
+        cursor = bullet(canvas, titleCase(drawingFacing(project, drawing).name()) + " facing", x + 10, cursor);
 
         cursor -= 8;
         text(canvas, BOLD, 6.2f, CORAL, "SPACE EFFICIENCY", x + 10, cursor);
@@ -192,10 +216,12 @@ public class FloorPlanPdfService {
     }
 
     private void renderPlan(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            String floor, int sheetNumber, int sheetCount,
             float panelX, float panelY, float panelWidth, float panelHeight) throws IOException {
         fill(canvas, Color.WHITE, panelX, panelY, panelWidth, panelHeight);
         stroke(canvas, LINE, .7f, panelX, panelY, panelWidth, panelHeight);
         var geometry = drawing.geometry();
+        var rooms = roomsForFloor(drawing, floor);
         var topReserved = 44f;
         var bottomReserved = 38f;
         var availableWidth = panelWidth - 56;
@@ -208,14 +234,17 @@ public class FloorPlanPdfService {
 
         text(canvas, BOLD, 6.2f, CORAL, "AUTHORITATIVE FLOOR PLAN MAP", panelX + 12,
                 panelY + panelHeight - 16);
-        text(canvas, BOLD, 10, INK, "GROUND FLOOR PLAN", panelX + 12, panelY + panelHeight - 29);
+        text(canvas, BOLD, 10, INK, floorTitle(floor).toUpperCase(Locale.ROOT) + " PLAN",
+                panelX + 12, panelY + panelHeight - 29);
+        textRight(canvas, BOLD, 5.8f, CORAL, "SHEET " + sheetNumber + " / " + sheetCount,
+                panelX + panelWidth - 12, panelY + panelHeight - 29);
         textRight(canvas, REGULAR, 5.8f, MUTED, "ALL DIMENSIONS IN FEET", panelX + panelWidth - 12,
                 panelY + panelHeight - 16);
         fill(canvas, new Color(253, 252, 249), originX, originY, plotWidth, plotHeight);
         stroke(canvas, WALL, 1.1f, originX, originY, plotWidth, plotHeight);
 
-        for (int index = 0; index < geometry.rooms().size(); index++) {
-            var room = geometry.rooms().get(index);
+        for (int index = 0; index < rooms.size(); index++) {
+            var room = rooms.get(index);
             var roomX = originX + (float) room.x() * scale;
             var roomY = originY + (float) (geometry.plotLength() - room.y() - room.length()) * scale;
             var roomWidth = (float) room.width() * scale;
@@ -225,11 +254,12 @@ public class FloorPlanPdfService {
             renderRoomFixture(canvas, room, roomX, roomY, roomWidth, roomHeight);
             renderRoomLabel(canvas, room, roomX, roomY, roomWidth, roomHeight);
         }
-        renderBuildingEnvelope(canvas, geometry.rooms(), originX, originY, scale, geometry.plotLength());
-        renderOpenings(canvas, geometry.doors(), geometry.windows(), originX, originY, scale,
+        renderBuildingEnvelope(canvas, rooms, originX, originY, scale, geometry.plotLength());
+        renderOpenings(canvas, openingsForFloor(geometry.doors(), floor),
+                openingsForFloor(geometry.windows(), floor), originX, originY, scale,
                 geometry.plotLength());
         renderPlanAnnotations(canvas, project, drawing, panelX, panelY, panelWidth, panelHeight,
-                originX, originY, plotWidth, plotHeight);
+                originX, originY, plotWidth, plotHeight, floor, rooms);
     }
 
     private void renderRoomLabel(PDPageContentStream canvas, RoomGeometry room,
@@ -254,6 +284,13 @@ public class FloorPlanPdfService {
         return switch (type == null ? "" : type) {
             case "LIVING_ROOM" -> "Living";
             case "SENIOR_BEDROOM" -> "Bedroom";
+            case "MASTER_BEDROOM" -> "Master Bed";
+            case "FAMILY_LOUNGE" -> "Lounge";
+            case "MULTIPURPOSE_ROOM" -> "Multi-use";
+            case "ATTACHED_BATHROOM" -> "Ensuite";
+            case "DRESSING_ROOM" -> "Dressing";
+            case "HOME_OFFICE" -> "Office";
+            case "PRAYER_ROOM" -> "Prayer";
             case "STAIRCASE" -> "Stairs";
             case "BATHROOM" -> "Bath";
             default -> fitCharacters(titleCase(type), 9);
@@ -286,7 +323,7 @@ public class FloorPlanPdfService {
             line(canvas, FIXTURE, 1.4f, x + width + 2, y + 8, x + width + 2, y + 18);
             line(canvas, FIXTURE, 1.4f, x - 2, y + height - 18, x - 2, y + height - 8);
             line(canvas, FIXTURE, 1.4f, x + width + 2, y + height - 18, x + width + 2, y + height - 8);
-        } else if (type.contains("LIVING")) {
+        } else if (type.contains("LIVING") || type.contains("LOUNGE") || type.contains("MULTIPURPOSE")) {
             var width = Math.min(76, roomWidth * .58f);
             var height = Math.min(18, roomHeight * .14f);
             var x = centerX - width / 2;
@@ -333,10 +370,22 @@ public class FloorPlanPdfService {
             var radius = Math.min(7, Math.min(roomWidth, roomHeight) * .15f);
             circle(canvas, FIXTURE, .5f, centerX, fixtureY + radius, radius);
             stroke(canvas, FIXTURE, .45f, centerX - radius, fixtureY + radius * 2, radius * 2, 5);
-        } else if (type.contains("UTILITY")) {
+        } else if (type.contains("UTILITY") || type.contains("LAUNDRY")) {
             var size = Math.min(21, Math.min(roomWidth, roomHeight) * .3f);
             stroke(canvas, FIXTURE, .5f, centerX - size / 2, fixtureY, size, size);
             circle(canvas, FIXTURE, .45f, centerX, fixtureY + size / 2, size * .32f);
+        } else if (type.contains("STUDY") || type.contains("OFFICE")) {
+            var width = Math.min(42, roomWidth * .55f);
+            line(canvas, FIXTURE, 2f, centerX - width / 2, fixtureY + 8, centerX + width / 2, fixtureY + 8);
+            stroke(canvas, FIXTURE, .5f, centerX - 7, fixtureY - 2, 14, 10);
+        } else if (type.contains("BALCONY") || type.contains("TERRACE")) {
+            var radius = Math.min(7, Math.min(roomWidth, roomHeight) * .14f);
+            circle(canvas, FIXTURE, .55f, centerX, fixtureY + radius, radius);
+            line(canvas, FIXTURE, .55f, centerX, fixtureY, centerX, fixtureY - radius);
+        } else if (type.contains("PRAYER")) {
+            var width = Math.min(28, roomWidth * .45f);
+            stroke(canvas, FIXTURE, .55f, centerX - width / 2, fixtureY, width, 12);
+            line(canvas, FIXTURE, .45f, centerX, fixtureY + 12, centerX, fixtureY + 21);
         }
     }
 
@@ -362,46 +411,103 @@ public class FloorPlanPdfService {
             var y = number(door.get("y"));
             var width = Math.max(2.4, number(door.get("width")));
             if (!Double.isFinite(x) || !Double.isFinite(y)) continue;
-            var startX = originX + (float) (x - width / 2) * scale;
-            var endX = originX + (float) (x + width / 2) * scale;
-            var pointY = originY + (float) (plotLength - y) * scale;
-            line(canvas, Color.WHITE, 3.1f, startX, pointY, endX, pointY);
-            canvas.setStrokingColor(CORAL);
-            canvas.setLineWidth(.7f);
-            var radius = endX - startX;
-            var opensRight = !"RIGHT".equalsIgnoreCase(String.valueOf(door.get("swing")));
-            if (opensRight) {
-                line(canvas, CORAL, .8f, startX, pointY, startX, pointY + radius);
-                canvas.moveTo(endX, pointY);
-                canvas.curveTo(endX, pointY + radius * .55f, startX + radius * .55f, pointY + radius,
-                        startX, pointY + radius);
+            var orientation = normalizedOrientation(door.get("orientation"), "SOUTH");
+            if ("EAST".equals(orientation) || "WEST".equals(orientation)) {
+                renderVerticalDoor(canvas, x, y, width, orientation, door.get("swing"),
+                        originX, originY, scale, plotLength);
             } else {
-                line(canvas, CORAL, .8f, endX, pointY, endX, pointY + radius);
-                canvas.moveTo(startX, pointY);
-                canvas.curveTo(startX, pointY + radius * .55f, endX - radius * .55f, pointY + radius,
-                        endX, pointY + radius);
+                renderHorizontalDoor(canvas, x, y, width, orientation, door.get("swing"),
+                        originX, originY, scale, plotLength);
             }
-            canvas.stroke();
         }
         for (var window : windows == null ? List.<Map<String, Object>>of() : windows) {
             var x = number(window.get("x"));
             var y = number(window.get("y"));
             var width = Math.max(2.5, number(window.get("width")));
             if (!Double.isFinite(x) || !Double.isFinite(y)) continue;
-            var pointX = originX + (float) x * scale;
-            var fromY = originY + (float) (plotLength - y - width / 2) * scale;
-            var toY = originY + (float) (plotLength - y + width / 2) * scale;
-            line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
-            line(canvas, WINDOW, .8f, pointX - 1.1f, fromY, pointX - 1.1f, toY);
-            line(canvas, WINDOW, .8f, pointX + 1.1f, fromY, pointX + 1.1f, toY);
-            line(canvas, WINDOW, .45f, pointX - 2.2f, fromY, pointX + 2.2f, fromY);
-            line(canvas, WINDOW, .45f, pointX - 2.2f, toY, pointX + 2.2f, toY);
+            var orientation = normalizedOrientation(window.get("orientation"), "WEST");
+            if ("NORTH".equals(orientation) || "SOUTH".equals(orientation)) {
+                var fromX = originX + (float) (x - width / 2) * scale;
+                var toX = originX + (float) (x + width / 2) * scale;
+                var pointY = originY + (float) (plotLength - y) * scale;
+                line(canvas, Color.WHITE, 3.1f, fromX, pointY, toX, pointY);
+                line(canvas, WINDOW, .8f, fromX, pointY - 1.1f, toX, pointY - 1.1f);
+                line(canvas, WINDOW, .8f, fromX, pointY + 1.1f, toX, pointY + 1.1f);
+            } else {
+                var pointX = originX + (float) x * scale;
+                var fromY = originY + (float) (plotLength - y - width / 2) * scale;
+                var toY = originY + (float) (plotLength - y + width / 2) * scale;
+                line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
+                line(canvas, WINDOW, .8f, pointX - 1.1f, fromY, pointX - 1.1f, toY);
+                line(canvas, WINDOW, .8f, pointX + 1.1f, fromY, pointX + 1.1f, toY);
+            }
         }
+    }
+
+    private void renderHorizontalDoor(PDPageContentStream canvas, double x, double y, double width,
+            String orientation, Object swing, float originX, float originY, float scale, double plotLength)
+            throws IOException {
+        var startX = originX + (float) (x - width / 2) * scale;
+        var endX = originX + (float) (x + width / 2) * scale;
+        var pointY = originY + (float) (plotLength - y) * scale;
+        line(canvas, Color.WHITE, 3.1f, startX, pointY, endX, pointY);
+        var radius = endX - startX;
+        var direction = "NORTH".equals(orientation) ? -1f : 1f;
+        var rightHinge = "RIGHT".equalsIgnoreCase(String.valueOf(swing));
+        var hingeX = rightHinge ? endX : startX;
+        line(canvas, CORAL, .8f, hingeX, pointY, hingeX, pointY + direction * radius);
+        canvas.setStrokingColor(CORAL);
+        canvas.setLineWidth(.7f);
+        if (rightHinge) {
+            canvas.moveTo(startX, pointY);
+            canvas.curveTo(startX, pointY + direction * radius * .55f,
+                    endX - radius * .55f, pointY + direction * radius, endX, pointY + direction * radius);
+        } else {
+            canvas.moveTo(endX, pointY);
+            canvas.curveTo(endX, pointY + direction * radius * .55f,
+                    startX + radius * .55f, pointY + direction * radius, startX, pointY + direction * radius);
+        }
+        canvas.stroke();
+    }
+
+    private void renderVerticalDoor(PDPageContentStream canvas, double x, double y, double width,
+            String orientation, Object swing, float originX, float originY, float scale, double plotLength)
+            throws IOException {
+        var pointX = originX + (float) x * scale;
+        var fromY = originY + (float) (plotLength - y - width / 2) * scale;
+        var toY = originY + (float) (plotLength - y + width / 2) * scale;
+        line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
+        var radius = toY - fromY;
+        var direction = "EAST".equals(orientation) ? -1f : 1f;
+        var upperHinge = "RIGHT".equalsIgnoreCase(String.valueOf(swing));
+        var hingeY = upperHinge ? toY : fromY;
+        line(canvas, CORAL, .8f, pointX, hingeY, pointX + direction * radius, hingeY);
+        canvas.setStrokingColor(CORAL);
+        canvas.setLineWidth(.7f);
+        if (upperHinge) {
+            canvas.moveTo(pointX, fromY);
+            canvas.curveTo(pointX + direction * radius * .55f, fromY,
+                    pointX + direction * radius, toY - radius * .55f, pointX + direction * radius, toY);
+        } else {
+            canvas.moveTo(pointX, toY);
+            canvas.curveTo(pointX + direction * radius * .55f, toY,
+                    pointX + direction * radius, fromY + radius * .55f, pointX + direction * radius, fromY);
+        }
+        canvas.stroke();
+    }
+
+    private String normalizedOrientation(Object value, String fallback) {
+        if (value == null) return fallback;
+        var orientation = value.toString().toUpperCase(Locale.ROOT);
+        return switch (orientation) {
+            case "NORTH", "SOUTH", "EAST", "WEST" -> orientation;
+            default -> fallback;
+        };
     }
 
     private void renderPlanAnnotations(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
             float panelX, float panelY, float panelWidth, float panelHeight, float originX, float originY,
-            float plotWidth, float plotHeight) throws IOException {
+            float plotWidth, float plotHeight, String floor, List<RoomGeometry> rooms) throws IOException {
         dimensionHorizontal(canvas, originX, originX + plotWidth, originY + plotHeight + 8,
                 oneDecimal(drawing.geometry().plotWidth()) + " ft plot width");
         dimensionVertical(canvas, originX - 11, originY, originY + plotHeight,
@@ -413,7 +519,7 @@ public class FloorPlanPdfService {
         line(canvas, INK, 1f, northX, northY + 16, northX + 4, northY + 10);
         textCentered(canvas, BOLD, 6, INK, "N", northX, northY - 8);
 
-        var facing = project.details().roadFacing();
+        var facing = drawingFacing(project, drawing);
         switch (facing) {
             case NORTH -> line(canvas, CORAL, 2.2f, originX, originY + plotHeight, originX + plotWidth,
                     originY + plotHeight);
@@ -424,9 +530,10 @@ public class FloorPlanPdfService {
         }
         text(canvas, BOLD, 5.6f, CORAL,
                 facing.name() + "-FACING ROAD / ACCESS", panelX + 12, panelY + 11);
+        var floorProgramArea = rooms.stream().mapToDouble(RoomGeometry::area).sum();
         textRight(canvas, REGULAR, 5.3f, MUTED,
-                grouped(drawing.builtUpArea()) + " SQ FT TOTAL BUILT-UP (" + project.details().floors()
-                        + " FLOOR" + (project.details().floors() == 1 ? "" : "S") + ")", panelX + panelWidth - 12,
+                grouped(Math.round(floorProgramArea)) + " SQ FT " + floorTitle(floor).toUpperCase(Locale.ROOT)
+                        + " PROGRAM AREA", panelX + panelWidth - 12,
                 panelY + 11);
     }
 
@@ -448,6 +555,7 @@ public class FloorPlanPdfService {
     }
 
     private void renderCompactSummary(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            String floor, int sheetNumber, int sheetCount,
             float x, float y, float width, float height) throws IOException {
         fill(canvas, Color.WHITE, x, y, width, height);
         stroke(canvas, LINE, .7f, x, y, width, height);
@@ -459,20 +567,23 @@ public class FloorPlanPdfService {
         line(canvas, LINE, .55f, x + firstWidth + secondWidth, y + provenanceHeight,
                 x + firstWidth + secondWidth, y + height);
 
-        var rooms = drawing.geometry().rooms();
+        var rooms = roomsForFloor(drawing, floor);
         var bedrooms = rooms.stream().filter(room -> room.type().contains("BEDROOM")).count();
         var bathrooms = rooms.stream().filter(room -> room.type().contains("BATH")
                 || room.type().contains("TOILET")).count();
+        var doors = openingsForFloor(drawing.geometry().doors(), floor).size();
+        var windows = openingsForFloor(drawing.geometry().windows(), floor).size();
         summaryCell(canvas, "PLAN HIGHLIGHTS",
                 bedrooms + " bedroom" + (bedrooms == 1 ? "" : "s") + " | " + bathrooms + " bathroom"
                         + (bathrooms == 1 ? "" : "s"),
-                rooms.size() + " placed spaces | Ground shown | " + project.details().floors() + " floor"
-                        + (project.details().floors() == 1 ? "" : "s") + " requested", x, y + provenanceHeight,
+                rooms.size() + " spaces | " + doors + " doors | " + windows + " windows",
+                x, y + provenanceHeight,
                 firstWidth, height - provenanceHeight);
         summaryCell(canvas, "EST. BUILD COST", lakhRange(drawing), "Planning range",
                 x + firstWidth, y + provenanceHeight, secondWidth, height - provenanceHeight);
-        summaryCell(canvas, "ORIENTATION", titleCase(project.details().roadFacing().name()) + " facing",
-                geometryFloors(drawing), x + firstWidth + secondWidth, y + provenanceHeight,
+        summaryCell(canvas, "ORIENTATION", titleCase(drawingFacing(project, drawing).name()) + " facing",
+                floorTitle(floor) + " | Sheet " + sheetNumber + " of " + sheetCount,
+                x + firstWidth + secondWidth, y + provenanceHeight,
                 width - firstWidth - secondWidth, height - provenanceHeight);
 
         fill(canvas, PAPER, x + 1, y + 1, width - 2, provenanceHeight - 1);
@@ -506,13 +617,16 @@ public class FloorPlanPdfService {
         card(canvas, "SPECIFICATIONS", x, y, width, height);
         var cursor = y + height - 31;
         cursor = keyValue(canvas, "Project", project.projectCode(), x + 10, cursor, width - 20);
-        cursor = keyValue(canvas, "Plot area", grouped(Math.round(project.details().plotArea())) + " sq ft", x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Plot area", grouped(Math.round(
+                drawing.geometry().plotWidth() * drawing.geometry().plotLength())) + " sq ft",
+                x + 10, cursor, width - 20);
         cursor = keyValue(canvas, "Built-up", grouped(drawing.builtUpArea()) + " sq ft", x + 10, cursor, width - 20);
-        cursor = keyValue(canvas, "Plot", oneDecimal(project.details().plotWidth()) + " x "
-                + oneDecimal(project.details().plotLength()) + " ft", x + 10, cursor, width - 20);
-        cursor = keyValue(canvas, "Floors requested", String.valueOf(project.details().floors()), x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Plot", oneDecimal(drawing.geometry().plotWidth()) + " x "
+                + oneDecimal(drawing.geometry().plotLength()) + " ft", x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Floors requested", String.valueOf(requestedFloorCount(project, drawing)),
+                x + 10, cursor, width - 20);
         cursor = keyValue(canvas, "Geometry floors", geometryFloors(drawing), x + 10, cursor, width - 20);
-        keyValue(canvas, "Orientation", titleCase(project.details().roadFacing().name()), x + 10, cursor, width - 20);
+        keyValue(canvas, "Orientation", titleCase(drawingFacing(project, drawing).name()), x + 10, cursor, width - 20);
     }
 
     private void renderAreaBreakdown(PDPageContentStream canvas, DrawingCandidate drawing,
@@ -564,8 +678,8 @@ public class FloorPlanPdfService {
         line(canvas, LINE, .5f, x + 10, y + height - 22, x + width - 10, y + height - 22);
     }
 
-    private void renderDisclaimer(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing)
-            throws IOException {
+    private void renderDisclaimer(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,
+            String floor, int sheetNumber, int sheetCount) throws IOException {
         fill(canvas, INK, 36, 47, 523, 45);
         text(canvas, BOLD, 6.3f, new Color(235, 193, 137), "AVAS CONCEPTUAL PLAN", 49, 78);
         var warning = "This plan is generated for planning and estimation. It must be reviewed by a qualified "
@@ -573,7 +687,9 @@ public class FloorPlanPdfService {
         var lines = wrap(warning, REGULAR, 5.8f, 498);
         var y = 66f;
         for (var value : lines) { text(canvas, REGULAR, 5.8f, Color.WHITE, value, 49, y); y -= 8; }
-        var reviewNote = firstOrDefault(drawing.softRecommendations(), "Professional review is required.");
+        var reviewNote = legacyIncomplete(project, drawing)
+                ? "Legacy incomplete floor set: regenerate this concept to create every requested floor."
+                : firstOrDefault(drawing.softRecommendations(), "Professional review is required.");
         text(canvas, REGULAR, 4.7f, new Color(205, 197, 185),
                 "Review: " + fitWidth(reviewNote, REGULAR, 4.7f, 360), 49, 54);
         textRight(canvas, BOLD, 4.7f, new Color(235, 193, 137),
@@ -583,8 +699,9 @@ public class FloorPlanPdfService {
         text(canvas, BOLD, 7, INK, "AVAS", 36, 28);
         text(canvas, REGULAR, 5.3f, MUTED,
                 safe(project.projectCode() + "  |  Drawing v" + drawing.version() + "  |  "
-                        + titleCase(drawing.strategy())), 78, 28);
-        textRight(canvas, REGULAR, 5.3f, MUTED, "Design smarter. Validate before building.", 559, 28);
+                        + titleCase(drawing.strategy()) + "  |  " + floorTitle(floor)), 78, 28);
+        textRight(canvas, REGULAR, 5.3f, MUTED,
+                "Sheet " + sheetNumber + " of " + sheetCount + " | Validate before building.", 559, 28);
     }
 
     private void fill(PDPageContentStream canvas, Color color, float x, float y, float width, float height)
@@ -743,6 +860,89 @@ public class FloorPlanPdfService {
         return drawing.geometry().rooms().stream().map(RoomGeometry::floor).filter(value -> value != null && !value.isBlank())
                 .distinct().map(this::titleCase).sorted().reduce((left, right) -> left + ", " + right)
                 .orElse("Not recorded");
+    }
+
+    private List<String> floorKeys(DrawingCandidate drawing) {
+        return drawing.geometry().rooms().stream()
+                .map(room -> normalizedFloor(room.floor()))
+                .distinct()
+                .sorted((left, right) -> Integer.compare(floorOrder(left), floorOrder(right)))
+                .toList();
+    }
+
+    private List<String> expectedFloorKeys(int floorCount) {
+        var floors = List.of("GROUND", "FIRST", "SECOND");
+        return floors.subList(0, Math.max(0, Math.min(floorCount, floors.size())));
+    }
+
+    private List<RoomGeometry> roomsForFloor(DrawingCandidate drawing, String floor) {
+        var normalized = normalizedFloor(floor);
+        return drawing.geometry().rooms().stream()
+                .filter(room -> normalizedFloor(room.floor()).equals(normalized))
+                .toList();
+    }
+
+    private List<Map<String, Object>> openingsForFloor(List<Map<String, Object>> openings, String floor) {
+        if (openings == null) return List.of();
+        var normalized = normalizedFloor(floor);
+        return openings.stream()
+                .filter(opening -> normalizedFloor(opening.get("floor") == null
+                        ? null : opening.get("floor").toString()).equals(normalized))
+                .toList();
+    }
+
+    private String normalizedFloor(String floor) {
+        if (floor == null || floor.isBlank()) return "GROUND";
+        var normalized = floor.trim().toUpperCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+        return switch (normalized) {
+            case "GROUND_FLOOR", "G", "0" -> "GROUND";
+            case "FIRST_FLOOR", "F1", "1" -> "FIRST";
+            case "SECOND_FLOOR", "F2", "2" -> "SECOND";
+            default -> normalized;
+        };
+    }
+
+    private int floorOrder(String floor) {
+        return switch (normalizedFloor(floor)) {
+            case "GROUND" -> 0;
+            case "FIRST" -> 1;
+            case "SECOND" -> 2;
+            default -> 99;
+        };
+    }
+
+    private String floorTitle(String floor) {
+        return titleCase(normalizedFloor(floor)) + " Floor";
+    }
+
+    private boolean legacyIncomplete(ProjectSummary project, DrawingCandidate drawing) {
+        return !"multi-floor-1".equals(versions(drawing).get("geometrySchemaVersion"))
+                && !floorKeys(drawing).equals(expectedFloorKeys(requestedFloorCount(project, drawing)));
+    }
+
+    private int requestedFloorCount(ProjectSummary project, DrawingCandidate drawing) {
+        var frozen = versions(drawing).get("requestedFloors");
+        if (frozen != null) {
+            try {
+                var parsed = Integer.parseInt(frozen);
+                if (parsed >= 1 && parsed <= 3) return parsed;
+            } catch (NumberFormatException ignored) {
+                // Legacy drawings fall back to the project details available at render time.
+            }
+        }
+        return project.details().floors();
+    }
+
+    private Facing drawingFacing(ProjectSummary project, DrawingCandidate drawing) {
+        var frozen = versions(drawing).get("roadFacing");
+        if (frozen != null) {
+            try {
+                return Facing.valueOf(frozen.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                // Legacy drawings fall back to the project details available at render time.
+            }
+        }
+        return project.details().roadFacing();
     }
 
     private String safe(String value) {

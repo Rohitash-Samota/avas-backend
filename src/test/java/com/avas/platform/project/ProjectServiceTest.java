@@ -14,7 +14,7 @@ class ProjectServiceTest {
     @BeforeEach
     void setUp() {
         var geometry = new GeometryEngine();
-        service = new ProjectService(geometry, "RJ-JDA-2026.08", "AVAS-KB-2026.08", "layout-heuristic-1.4.2", "planning-estimate-1.2.0");
+        service = new ProjectService(geometry, "RJ-JDA-2026.08", "AVAS-KB-2026.08", "layout-heuristic-1.5.0", "planning-estimate-1.2.0");
     }
 
     @Test
@@ -43,12 +43,17 @@ class ProjectServiceTest {
         assertThat(job.status()).isEqualTo(JobStatus.COMPLETED);
         assertThat(drawings).hasSize(3).extracting(DrawingCandidate::strategy)
                 .containsExactly("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
-        assertThat(drawings).allSatisfy(drawing -> assertThat(drawing.hardViolations()).isEmpty());
+        assertThat(drawings).allSatisfy(drawing -> {
+            assertThat(drawing.hardViolations()).isNotEmpty()
+                    .allMatch(violation -> violation.startsWith("Programme gap:"));
+            assertThat(drawing.explanations()).anyMatch(explanation -> explanation.contains("Professional review required"));
+        });
 
         var estimate = service.generateEstimate(project.id(), drawings.get(1).id(), "INDIVIDUAL");
         assertThat(estimate.items()).hasSize(7);
         assertThat(estimate.low()).isLessThan(estimate.high());
-        assertThat(service.validation(drawings.get(1).id()).status()).isEqualTo(EngineStatus.SUCCESS);
+        assertThat(service.validation(drawings.get(1).id()).status()).isEqualTo(EngineStatus.EXPERT_REVIEW);
+        assertThat(service.get(project.id()).status()).isEqualTo("REVIEW_REQUIRED");
     }
 
     @Test

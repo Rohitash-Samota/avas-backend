@@ -90,5 +90,5 @@ avas:
   versions:
     rules: RJ-JDA-2026.08
     knowledge: AVAS-KB-2026.08
-    strategy: layout-heuristic-1.4.2
+    strategy: layout-heuristic-1.5.0
     estimate-policy: planning-estimate-1.2.0
