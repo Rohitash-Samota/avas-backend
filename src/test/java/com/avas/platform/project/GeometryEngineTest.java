@@ -23,6 +23,13 @@ class GeometryEngineTest {
         assertThat(candidates).allSatisfy(candidate -> {
             assertThat(candidate.hardViolations()).isEmpty();
             assertThat(engine.validate(40, 60, candidate.geometry().rooms())).isEmpty();
+            assertThat(candidate.geometry().doors()).hasSameSizeAs(candidate.geometry().rooms());
+            assertThat(candidate.geometry().windows()).hasSameSizeAs(candidate.geometry().rooms());
+            assertThat(candidate.versions())
+                    .containsEntry("generator", "AVAS deterministic layout engine")
+                    .containsEntry("generationModel", "No generative AI model")
+                    .containsEntry("strategyId", candidate.strategy())
+                    .containsKeys("optimizerSeed", "ruleVersion", "strategyVersion");
         });
     }
 

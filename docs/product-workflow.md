@@ -48,3 +48,5 @@ This sequence consolidates the complete 95-page product and technical specificat
 ## Release rule
 
 A phase is complete only when its API, database records, role/resource authorization, web page, restart/reload behavior, audit history and automated tests all pass. A static screen or in-memory result is not a completed workflow.
+
+Current PDF delivery is an authenticated, on-demand projection of persisted geometry rather than a durable generation job. The UI opens the floor-plan map and its related server PDF together, without presenting an application download button. A queue/worker should be introduced only when durable object-storage rendering is implemented; cron is not part of this request path.

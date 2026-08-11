@@ -51,6 +51,25 @@ class ProjectServiceTest {
         assertThat(service.validation(drawings.get(1).id()).status()).isEqualTo(EngineStatus.SUCCESS);
     }
 
+    @Test
+    void keepsExactlyOneSelectedConceptWhenCustomerChangesSelection() {
+        var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        service.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
+        service.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        service.generateDrawings(project.id(), "INDIVIDUAL");
+        var drawings = service.drawings(project.id());
+
+        service.approveConcept(drawings.get(0).id(), "INDIVIDUAL");
+        var selected = service.approveConcept(drawings.get(2).id(), "INDIVIDUAL");
+
+        assertThat(selected.conceptApproved()).isTrue();
+        assertThat(service.drawings(project.id()))
+                .filteredOn(DrawingCandidate::conceptApproved)
+                .extracting(DrawingCandidate::id)
+                .containsExactly(drawings.get(2).id());
+    }
+
     private BasicDetailsRequest details() {
         return new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur, Rajasthan", 2, 7_000_000, Category.NOT_SURE, new FamilyDetails(2, 2, 1, true), List.of("Vastu-friendly", "Family lounge", "Future expansion"));
     }

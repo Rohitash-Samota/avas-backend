@@ -9,6 +9,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.CacheControl;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -24,8 +25,11 @@ import static com.avas.platform.security.ActiveRoleFilter.ACTIVE_ROLE;
 public class ProjectController {
     private final ProjectService service;
     private final AuthService auth;
+    private final FloorPlanPdfService pdf;
 
-    public ProjectController(ProjectService service, AuthService auth) { this.service = service; this.auth = auth; }
+    public ProjectController(ProjectService service, AuthService auth, FloorPlanPdfService pdf) {
+        this.service = service; this.auth = auth; this.pdf = pdf;
+    }
 
     public record EstimateGenerateRequest(@NotBlank String drawingId) {}
 
@@ -137,11 +141,27 @@ public class ProjectController {
         drawingAccess(drawingId, principal, request); return service.validation(drawingId);
     }
 
-    @GetMapping(value = "/drawings/{drawingId}/download", produces = MediaType.APPLICATION_JSON_VALUE)
-    ResponseEntity<DrawingCandidate> download(@PathVariable String drawingId, HttpServletRequest request,
+    @GetMapping(value = {"/drawings/{drawingId}/pdf", "/drawings/{drawingId}/download",
+            "/drawings/{drawingId}/download.pdf"}, produces = MediaType.APPLICATION_PDF_VALUE)
+    ResponseEntity<byte[]> pdf(@PathVariable String drawingId, HttpServletRequest request,
             @AuthenticationPrincipal AvasPrincipal principal) {
         drawingAccess(drawingId, principal, request);
-        return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=avas-concept-" + drawingId + ".json").body(service.drawing(drawingId));
+        var drawing = service.drawing(drawingId);
+        byte[] rendered;
+        try {
+            rendered = pdf.generate(service.get(drawing.projectId()), drawing);
+        } catch (IllegalArgumentException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.UNPROCESSABLE_ENTITY, exception.getMessage(), exception);
+        }
+        var filename = "avas-" + safeFilename(drawing.name()) + "-v" + drawing.version() + ".pdf";
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_PDF)
+                .contentLength(rendered.length)
+                .cacheControl(CacheControl.noStore().cachePrivate())
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + filename + "\"")
+                .header("X-AVAS-Drawing-Id", drawing.id())
+                .body(rendered);
     }
 
     @PostMapping("/projects/{projectId}/estimates/generate")
@@ -196,5 +216,10 @@ public class ProjectController {
     }
     private void estimateAccess(String estimateId, AvasPrincipal principal, HttpServletRequest request) {
         service.requireAccess(service.projectIdForEstimate(estimateId), principal, role(request));
+    }
+    private String safeFilename(String value) {
+        var normalized = value == null ? "concept" : value.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-").replaceAll("(^-|-$)", "");
+        return normalized.isBlank() ? "concept" : normalized;
     }
 }

@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static com.avas.platform.project.ProjectModels.*;
 
@@ -48,6 +49,15 @@ class GeometryEngine {
             var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
             var footprint = rooms.stream().mapToDouble(RoomGeometry::area).sum();
             var builtUpArea = (int) Math.round(footprint * details.floors() * strategy.areaFactor());
+            var provenance = new LinkedHashMap<>(versions);
+            provenance.put("generator", "AVAS deterministic layout engine");
+            provenance.put("generationMode", "DETERMINISTIC");
+            provenance.put("generationModel", "No generative AI model");
+            provenance.put("modelVersion", "not-applicable");
+            provenance.put("promptVersion", "not-used");
+            provenance.put("strategyId", strategy.key());
+            provenance.put("optimizerSeed", Integer.toUnsignedString(
+                    Objects.hash(projectId, version, strategy.key())));
 
             candidates.add(new DrawingCandidate(
                     "drawing-" + projectId + "-v" + version + "-" + (index + 1),
@@ -62,13 +72,14 @@ class GeometryEngine {
                     strategy.naturalLightScore(),
                     strategy.spaceEfficiencyScore(),
                     92 - index,
-                    new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms, List.of(), List.of()),
+                    new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms,
+                            doorsFor(rooms), windowsFor(rooms)),
                     violations,
                     List.of(
                             "Verify setbacks against the applicable local authority release.",
                             "A licensed structural engineer must approve the final grid."),
                     strategy.explanations(),
-                    new LinkedHashMap<>(versions),
+                    Map.copyOf(provenance),
                     reviewRequired ? "EXPERT_REVIEW" : "SUCCESS",
                     false,
                     Instant.now()));
@@ -129,6 +140,42 @@ class GeometryEngine {
     private RoomGeometry room(String id, String type, double x, double y, double width, double length) {
         return new RoomGeometry(id, type, round2(x), round2(y), round2(width), round2(length),
                 round2(width * length), "GROUND");
+    }
+
+    private List<Map<String, Object>> doorsFor(List<RoomGeometry> rooms) {
+        var doors = new ArrayList<Map<String, Object>>();
+        for (int index = 0; index < rooms.size(); index++) {
+            var room = rooms.get(index);
+            var width = round2(Math.min(3.0, Math.max(2.4, room.width() * .22)));
+            var door = new LinkedHashMap<String, Object>();
+            door.put("id", "D" + (index + 1));
+            door.put("roomId", room.id());
+            door.put("floor", room.floor());
+            door.put("x", round2(room.x() + room.width() / 2));
+            door.put("y", round2(room.y() + room.length()));
+            door.put("width", width);
+            door.put("swing", index % 2 == 0 ? "LEFT" : "RIGHT");
+            doors.add(Map.copyOf(door));
+        }
+        return List.copyOf(doors);
+    }
+
+    private List<Map<String, Object>> windowsFor(List<RoomGeometry> rooms) {
+        var windows = new ArrayList<Map<String, Object>>();
+        for (int index = 0; index < rooms.size(); index++) {
+            var room = rooms.get(index);
+            var onLeft = index % 2 == 0;
+            var window = new LinkedHashMap<String, Object>();
+            window.put("id", "W" + (index + 1));
+            window.put("roomId", room.id());
+            window.put("floor", room.floor());
+            window.put("x", round2(onLeft ? room.x() : room.x() + room.width()));
+            window.put("y", round2(room.y() + room.length() / 2));
+            window.put("width", round2(Math.min(4.0, Math.max(2.5, room.length() * .28))));
+            window.put("orientation", onLeft ? "WEST" : "EAST");
+            windows.add(Map.copyOf(window));
+        }
+        return List.copyOf(windows);
     }
 
     private double round2(double value) {

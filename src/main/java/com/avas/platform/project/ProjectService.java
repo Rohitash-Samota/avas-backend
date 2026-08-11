@@ -199,11 +199,21 @@ public class ProjectService {
 
     public synchronized DrawingCandidate approveConcept(String drawingId, String role) {
         var found = findDrawing(drawingId);
-        var approved = copyDrawing(found.drawing, true);
-        found.project.drawings.set(found.index, approved);
+        // A project has one authoritative concept at a time. Clear any earlier selection before
+        // persisting the new one so API responses and server-rendered PDFs cannot show two checked
+        // concepts after a customer changes their mind.
+        for (int index = 0; index < found.project.drawings.size(); index++) {
+            var drawing = found.project.drawings.get(index);
+            var selected = drawing.id().equals(drawingId);
+            if (drawing.conceptApproved() != selected) {
+                found.project.drawings.set(index, copyDrawing(drawing, selected));
+            }
+        }
+        var approved = found.project.drawings.get(found.index);
         found.project.status = "CONCEPT_APPROVED";
         found.project.updatedAt = Instant.now();
-        audit(found.project, "CONCEPT_DRAWING_APPROVED", role, drawingId, String.valueOf(approved.version()), "Concept approval recorded; professional approval remains required");
+        audit(found.project, "CONCEPT_DRAWING_APPROVED", role, drawingId, String.valueOf(approved.version()),
+                "Selected concept recorded; professional approval remains required");
         persist(found.project);
         return approved;
     }
