@@ -18,8 +18,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.pricing.PricingModels.*;
-
 @Service
 public class PricingService {
     private static final Logger log = LoggerFactory.getLogger(PricingService.class);
@@ -45,7 +43,7 @@ public class PricingService {
 
     @PostConstruct
     void seedConfiguration() {
-        if (!configurations.existsById(PlatformConfigurationEntity.GLOBAL_ID)) {
+        if (!configurations.existsByConfigurationKey(PlatformConfigurationEntity.GLOBAL_KEY)) {
             configurations.save(PlatformConfigurationEntity.defaults());
         }
     }
@@ -145,7 +143,7 @@ public class PricingService {
     @Transactional
     public BudgetRecommendationResponse feedback(UUID id, UUID userId, String activeRole,
             BudgetFeedbackRequest request) {
-        var value = recommendations.findById(id).orElseThrow(() ->
+        var value = recommendations.findByPublicId(id).orElseThrow(() ->
                 new ResponseStatusException(HttpStatus.NOT_FOUND, "Budget recommendation not found"));
         if (!value.requestedBy().equals(userId)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This recommendation belongs to another account");
@@ -197,7 +195,7 @@ public class PricingService {
 
     @Transactional
     public ModelReleaseResponse activateModel(UUID id, UUID actor, String activeRole) {
-        var value = models.findById(id).orElseThrow(() ->
+        var value = models.findByPublicId(id).orElseThrow(() ->
                 new ResponseStatusException(HttpStatus.NOT_FOUND, "Model release not found"));
         models.findByModelTypeAndStatus(value.modelType(), ModelStatus.ACTIVE).stream()
                 .filter(active -> !active.id().equals(id)).forEach(ModelReleaseEntity::retire);
@@ -214,7 +212,7 @@ public class PricingService {
 
     @Transactional
     public ModelReleaseResponse validateModel(UUID id, UUID actor, String activeRole, ModelValidationRequest request) {
-        var value = models.findById(id).orElseThrow(() ->
+        var value = models.findByPublicId(id).orElseThrow(() ->
                 new ResponseStatusException(HttpStatus.NOT_FOUND, "Model release not found"));
         try {
             value.validate(request.validationScore(), request.note());
@@ -228,12 +226,12 @@ public class PricingService {
     }
 
     private PlatformConfigurationEntity configuration() {
-        return configurations.findById(PlatformConfigurationEntity.GLOBAL_ID).orElseGet(() ->
+        return configurations.findByConfigurationKey(PlatformConfigurationEntity.GLOBAL_KEY).orElseGet(() ->
                 configurations.save(PlatformConfigurationEntity.defaults()));
     }
 
     private PriceSubmissionEntity requiredSubmission(UUID id) {
-        return submissions.findById(id).orElseThrow(() ->
+        return submissions.findByPublicId(id).orElseThrow(() ->
                 new ResponseStatusException(HttpStatus.NOT_FOUND, "Price submission not found"));
     }
 

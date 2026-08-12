@@ -1,19 +1,19 @@
 package com.avas.platform.auth;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import java.time.Instant;
 import java.util.UUID;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 
 @Entity
 @Table(name = "refresh_tokens", indexes = @Index(name = "idx_refresh_token_hash", columnList = "tokenHash", unique = true))
-public class RefreshTokenEntity {
-    @Id
-    private UUID id;
+public class RefreshTokenEntity extends AbstractLongIdEntity {
+    @Column(name = "public_id", nullable = false, unique = true, updatable = false)
+    private UUID publicId;
 
     @Column(nullable = false)
     private UUID userId;
@@ -33,7 +33,7 @@ public class RefreshTokenEntity {
     }
 
     public RefreshTokenEntity(UUID userId, String tokenHash, Instant expiresAt) {
-        this.id = UUID.randomUUID();
+        this.publicId = UUID.randomUUID();
         this.userId = userId;
         this.tokenHash = tokenHash;
         this.expiresAt = expiresAt;
@@ -43,7 +43,7 @@ public class RefreshTokenEntity {
     static RefreshTokenEntity rehydrate(UUID id, UUID userId, String tokenHash, Instant expiresAt,
             Instant revokedAt, Instant createdAt) {
         var token = new RefreshTokenEntity();
-        token.id = id;
+        token.publicId = id;
         token.userId = userId;
         token.tokenHash = tokenHash;
         token.expiresAt = expiresAt;
@@ -58,7 +58,7 @@ public class RefreshTokenEntity {
     }
 
     public UUID getId() {
-        return id;
+        return publicId;
     }
 
     public UUID getUserId() {

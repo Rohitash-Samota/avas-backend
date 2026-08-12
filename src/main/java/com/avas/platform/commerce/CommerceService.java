@@ -11,17 +11,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.commerce.CommerceModels.*;
-
 @Service
 public class CommerceService {
-    private static final List<ProductEntity> DEFAULT_CATALOG = List.of(
-            new ProductEntity("architect-review", "Architect concept review", "A licensed architect reviews one selected AVAS concept and records actionable notes.", "Design assurance", 15_000, "AR"),
-            new ProductEntity("structural-review", "Structural feasibility review", "Preliminary grid, span and foundation assumptions reviewed by a structural professional.", "Engineering", 22_000, "SR"),
-            new ProductEntity("site-consultation", "Site consultation", "One scheduled site visit with observations, photographs and an execution summary.", "Site services", 7_500, "SC"),
-            new ProductEntity("approval-readiness", "Approval readiness pack", "Drawing checklist and submission-readiness review for the applicable local authority.", "Compliance", 12_000, "AP"),
-            new ProductEntity("detailed-boq", "Detailed BOQ pack", "A trade-level quantity and rate pack derived from the approved conceptual drawing.", "Cost planning", 9_000, "BQ"),
-            new ProductEntity("project-kickoff", "Professional project kickoff", "A coordinated kickoff call with scope, responsibilities, milestones and risk register.", "Coordination", 18_000, "PK")
+    private static final List<CatalogProductDefinition> DEFAULT_CATALOG = List.of(
+            new CatalogProductDefinition("architect-review", "Architect concept review", "A licensed architect reviews one selected AVAS concept and records actionable notes.", "Design assurance", 15_000, "AR"),
+            new CatalogProductDefinition("structural-review", "Structural feasibility review", "Preliminary grid, span and foundation assumptions reviewed by a structural professional.", "Engineering", 22_000, "SR"),
+            new CatalogProductDefinition("site-consultation", "Site consultation", "One scheduled site visit with observations, photographs and an execution summary.", "Site services", 7_500, "SC"),
+            new CatalogProductDefinition("approval-readiness", "Approval readiness pack", "Drawing checklist and submission-readiness review for the applicable local authority.", "Compliance", 12_000, "AP"),
+            new CatalogProductDefinition("detailed-boq", "Detailed BOQ pack", "A trade-level quantity and rate pack derived from the approved conceptual drawing.", "Cost planning", 9_000, "BQ"),
+            new CatalogProductDefinition("project-kickoff", "Professional project kickoff", "A coordinated kickoff call with scope, responsibilities, milestones and risk register.", "Coordination", 18_000, "PK")
     );
 
     private final ProductRepository products;
@@ -49,7 +47,10 @@ public class CommerceService {
 
     @PostConstruct
     void seedCatalog() {
-        DEFAULT_CATALOG.stream().filter(product -> !products.existsByCode(product.getCode())).forEach(products::save);
+        DEFAULT_CATALOG.stream()
+                .filter(product -> !products.existsByCode(product.code()))
+                .map(CatalogProductDefinition::toEntity)
+                .forEach(products::save);
     }
 
     @Transactional(readOnly = true)
@@ -192,13 +193,15 @@ public class CommerceService {
     }
 
     private OrderEntity requiredOwnedOrder(UUID id, UUID userId) {
-        var order = orders.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found"));
+        var order = orders.findByPublicId(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found"));
         if (!order.getUserId().equals(userId)) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found");
         return order;
     }
 
     private PaymentEntity requiredOwnedPayment(UUID id, UUID userId) {
-        var payment = payments.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment session not found"));
+        var payment = payments.findByPublicId(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment session not found"));
         if (!payment.getUserId().equals(userId)) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Payment session not found");
         return payment;
     }
@@ -240,4 +243,10 @@ public class CommerceService {
 
     private String blankToNull(String value) { return value == null || value.isBlank() ? null : value.trim(); }
     private record ResolvedLine(ProductEntity product, int quantity) {}
+    private record CatalogProductDefinition(String code, String name, String description, String category,
+            long unitPrice, String icon) {
+        ProductEntity toEntity() {
+            return new ProductEntity(code, name, description, category, unitPrice, icon);
+        }
+    }
 }

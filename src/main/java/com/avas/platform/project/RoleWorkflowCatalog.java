@@ -3,8 +3,6 @@ package com.avas.platform.project;
 import java.util.List;
 import java.util.Set;
 
-import static com.avas.platform.project.ProjectModels.WorkspaceStep;
-
 /**
  * Product workflow metadata from specification sections 25-30 and 40. Keeping it on the
  * server makes the active role, permissions and visible journey one authoritative contract.

@@ -1,6 +1,13 @@
 package com.avas.platform.project.persistence;
 
-import com.avas.platform.project.ProjectModels.*;
+import com.avas.platform.project.AuditEvent;
+import com.avas.platform.project.BasicDetailsRequest;
+import com.avas.platform.project.DrawingCandidate;
+import com.avas.platform.project.Estimate;
+import com.avas.platform.project.ProjectStateSnapshot;
+import com.avas.platform.project.ProjectSummary;
+import com.avas.platform.project.RequirementSummary;
+import com.avas.platform.project.StartMode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
@@ -29,23 +36,23 @@ public class ProjectPersistenceService {
     @Transactional
     public void save(ProjectSummary value, String tenantId, UUID ownerUserId) {
         var detailsJson = value.details() == null ? null : json(value.details());
-        var record = projects.findById(value.id()).orElseGet(() -> new ProjectRecordEntity(value, detailsJson, tenantId, ownerUserId));
+        var record = projects.findByPublicId(value.id()).orElseGet(() -> new ProjectRecordEntity(value, detailsJson, tenantId, ownerUserId));
         record.updateOwnership(tenantId, ownerUserId);
         record.update(value, detailsJson);
         projects.save(record);
     }
 
     @Transactional public void save(RequirementSummary value) {
-        if (!requirements.existsById(value.snapshotId())) requirements.save(new RequirementSnapshotEntity(value, json(value)));
+        if (!requirements.existsBySnapshotId(value.snapshotId())) requirements.save(new RequirementSnapshotEntity(value, json(value)));
     }
     @Transactional public void save(DrawingCandidate value) {
         var payload = json(value);
-        var record = drawings.findById(value.id()).orElseGet(() -> new DrawingArtifactEntity(value, payload));
+        var record = drawings.findByDrawingId(value.id()).orElseGet(() -> new DrawingArtifactEntity(value, payload));
         record.update(value, payload); drawings.save(record);
     }
     @Transactional public void save(Estimate value) {
         var payload = json(value);
-        var record = estimates.findById(value.id()).orElseGet(() -> new EstimateArtifactEntity(value, payload));
+        var record = estimates.findByEstimateId(value.id()).orElseGet(() -> new EstimateArtifactEntity(value, payload));
         record.update(value, payload); estimates.save(record);
     }
     @Transactional public void save(AuditEvent value) {
@@ -60,24 +67,24 @@ public class ProjectPersistenceService {
     @Transactional public void save(ProjectStateSnapshot value, String tenantId, UUID ownerUserId) {
         var project = value.project();
         var detailsJson = project.details() == null ? null : json(project.details());
-        var projectRecord = projects.findById(project.id())
+        var projectRecord = projects.findByPublicId(project.id())
                 .orElseGet(() -> new ProjectRecordEntity(project, detailsJson, tenantId, ownerUserId));
         projectRecord.updateOwnership(tenantId, ownerUserId);
         projectRecord.update(project, detailsJson);
         projects.save(projectRecord);
 
-        if (value.requirement() != null && !requirements.existsById(value.requirement().snapshotId())) {
+        if (value.requirement() != null && !requirements.existsBySnapshotId(value.requirement().snapshotId())) {
             requirements.save(new RequirementSnapshotEntity(value.requirement(), json(value.requirement())));
         }
         value.drawings().forEach(drawing -> {
             var payload = json(drawing);
-            var record = drawings.findById(drawing.id()).orElseGet(() -> new DrawingArtifactEntity(drawing, payload));
+            var record = drawings.findByDrawingId(drawing.id()).orElseGet(() -> new DrawingArtifactEntity(drawing, payload));
             record.update(drawing, payload);
             drawings.save(record);
         });
         value.estimates().forEach(estimate -> {
             var payload = json(estimate);
-            var record = estimates.findById(estimate.id()).orElseGet(() -> new EstimateArtifactEntity(estimate, payload));
+            var record = estimates.findByEstimateId(estimate.id()).orElseGet(() -> new EstimateArtifactEntity(estimate, payload));
             record.update(estimate, payload);
             estimates.save(record);
         });
@@ -86,7 +93,7 @@ public class ProjectPersistenceService {
         });
 
         var payload = json(value);
-        var state = states.findById(project.id()).orElseGet(() -> new ProjectStateEntity(project.id(), payload));
+        var state = states.findByProjectId(project.id()).orElseGet(() -> new ProjectStateEntity(project.id(), payload));
         state.update(payload);
         states.save(state);
     }
@@ -100,18 +107,18 @@ public class ProjectPersistenceService {
     @Transactional
     public void retireLegacySampleProject() {
         var legacyId = "demo-project";
-        if (!projects.existsById(legacyId) && !states.existsById(legacyId)) return;
+        if (!projects.existsByPublicId(legacyId) && !states.existsByProjectId(legacyId)) return;
         estimates.deleteAllByProjectId(legacyId);
         drawings.deleteAllByProjectId(legacyId);
         requirements.deleteAllByProjectId(legacyId);
         audit.deleteAllByProjectId(legacyId);
-        states.deleteById(legacyId);
-        projects.deleteById(legacyId);
+        states.deleteByProjectId(legacyId);
+        projects.deleteByPublicId(legacyId);
     }
 
     @Transactional(readOnly = true)
     public Optional<ProjectStateSnapshot> loadState(String projectId) {
-        return states.findById(projectId).map(value -> read(value.payloadJson(), ProjectStateSnapshot.class));
+        return states.findByProjectId(projectId).map(value -> read(value.payloadJson(), ProjectStateSnapshot.class));
     }
 
     public record ProjectAccess(String projectId, String tenantId, UUID ownerUserId) {}
@@ -119,7 +126,7 @@ public class ProjectPersistenceService {
     @Transactional(readOnly = true)
     public java.util.List<ProjectAccess> loadAccess() {
         return projects.findAll().stream()
-                .map(value -> new ProjectAccess(value.id(), value.tenantId(), value.ownerUserId())).toList();
+                .map(value -> new ProjectAccess(value.publicId(), value.tenantId(), value.ownerUserId())).toList();
     }
 
     @Transactional(readOnly = true)
@@ -135,8 +142,8 @@ public class ProjectPersistenceService {
     }
 
     private ProjectSummary summary(ProjectRecordEntity value) {
-        return new ProjectSummary(value.id(), value.projectCode(), value.name(),
-                com.avas.platform.project.ProjectModels.StartMode.valueOf(value.startMode()), value.status(), value.snapshotVersion(),
+        return new ProjectSummary(value.publicId(), value.projectCode(), value.name(),
+                StartMode.valueOf(value.startMode()), value.status(), value.snapshotVersion(),
                 value.detailsJson() == null ? null : read(value.detailsJson(), BasicDetailsRequest.class), value.createdAt(), value.updatedAt());
     }
 

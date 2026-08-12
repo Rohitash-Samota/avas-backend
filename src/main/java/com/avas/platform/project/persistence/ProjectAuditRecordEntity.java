@@ -1,13 +1,12 @@
 package com.avas.platform.project.persistence;
 
-import com.avas.platform.project.ProjectModels.AuditEvent;
+import com.avas.platform.project.AuditEvent;
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import jakarta.persistence.*;
 import java.time.Instant;
-import java.util.UUID;
 
 @Entity @Table(name = "project_audit_logs", indexes = @Index(name = "idx_project_audit_project", columnList = "projectId"))
-class ProjectAuditRecordEntity {
-    @Id private UUID id;
+class ProjectAuditRecordEntity extends AbstractLongIdEntity {
     @Column(nullable = false, unique = true, length = 80) private String eventId;
     @Column(nullable = false, length = 80) private String projectId;
     @Column(nullable = false, length = 80) private String action;
@@ -18,7 +17,7 @@ class ProjectAuditRecordEntity {
     @Column(nullable = false, updatable = false) private Instant occurredAt;
     protected ProjectAuditRecordEntity() {}
     ProjectAuditRecordEntity(AuditEvent value) {
-        id = UUID.randomUUID(); eventId = value.id(); projectId = value.projectId(); action = value.action(); actorRole = value.actorRole();
+        eventId = value.id(); projectId = value.projectId(); action = value.action(); actorRole = value.actorRole();
         artifactId = value.artifactId(); artifactVersion = value.version(); detail = value.detail(); occurredAt = value.at();
     }
 }

@@ -39,6 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class AuthApiIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
+    @Autowired JpaUserRepository users;
 
     @Test
     void redirectsTheBackendRootToTheWebApplication() throws Exception {
@@ -79,6 +80,8 @@ class AuthApiIntegrationTest {
         var body = json.readTree(registration.getContentAsString());
         var accessToken = body.path("accessToken").asText();
         assertThat(accessToken).isNotBlank();
+        var userId = UUID.fromString(body.path("user").path("id").asText());
+        assertThat(users.findByPublicId(userId).orElseThrow().getDatabaseId()).isNotNull();
         mvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + accessToken))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.email").value(email));
 

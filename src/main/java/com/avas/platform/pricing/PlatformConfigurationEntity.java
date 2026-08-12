@@ -1,45 +1,78 @@
 package com.avas.platform.pricing;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
-import static com.avas.platform.pricing.PricingModels.PlatformConfigurationRequest;
-
 @Entity
 @Table(name = "platform_configuration")
-class PlatformConfigurationEntity {
-    static final String GLOBAL_ID = "GLOBAL";
+class PlatformConfigurationEntity extends AbstractLongIdEntity {
+    static final String GLOBAL_KEY = "GLOBAL";
 
-    @Id @Column(length = 30) private String id;
-    @Column(nullable = false, length = 3) private String defaultCurrency;
-    @Column(nullable = false, length = 100) private String defaultCity;
-    @Column(nullable = false, precision = 19, scale = 2) private BigDecimal economyCostPerSqFt;
-    @Column(nullable = false, precision = 19, scale = 2) private BigDecimal standardCostPerSqFt;
-    @Column(nullable = false, precision = 19, scale = 2) private BigDecimal premiumCostPerSqFt;
-    @Column(nullable = false, precision = 19, scale = 2) private BigDecimal luxuryCostPerSqFt;
-    @Column(nullable = false, precision = 6, scale = 2) private BigDecimal contingencyPercent;
-    @Column(nullable = false) private int minConfidenceSources;
-    @Column(nullable = false) private int priceFreshnessDays;
-    @Column(nullable = false, precision = 5, scale = 2) private BigDecimal confidenceThreshold;
-    @Column(nullable = false) private int recommendationValidityDays;
-    @Column(nullable = false) private boolean contributionsEnabled;
-    @Column(nullable = false) private boolean aiExplanationEnabled;
-    @Column(nullable = false) private boolean learningEnabled;
-    @Column(nullable = false) private long configurationVersion;
+    @Column(name = "configuration_key", nullable = false, unique = true, updatable = false, length = 30)
+    private String configurationKey;
+
+    @Column(nullable = false, length = 3)
+    private String defaultCurrency;
+
+    @Column(nullable = false, length = 100)
+    private String defaultCity;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal economyCostPerSqFt;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal standardCostPerSqFt;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal premiumCostPerSqFt;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal luxuryCostPerSqFt;
+
+    @Column(nullable = false, precision = 6, scale = 2)
+    private BigDecimal contingencyPercent;
+
+    @Column(nullable = false)
+    private int minConfidenceSources;
+
+    @Column(nullable = false)
+    private int priceFreshnessDays;
+
+    @Column(nullable = false, precision = 5, scale = 2)
+    private BigDecimal confidenceThreshold;
+
+    @Column(nullable = false)
+    private int recommendationValidityDays;
+
+    @Column(nullable = false)
+    private boolean contributionsEnabled;
+
+    @Column(nullable = false)
+    private boolean aiExplanationEnabled;
+
+    @Column(nullable = false)
+    private boolean learningEnabled;
+
+    @Column(nullable = false)
+    private long configurationVersion;
+
     private UUID updatedBy;
-    @Column(nullable = false) private Instant updatedAt;
 
-    protected PlatformConfigurationEntity() {}
+    @Column(nullable = false)
+    private Instant updatedAt;
+
+    protected PlatformConfigurationEntity() {
+    }
 
     static PlatformConfigurationEntity defaults() {
         var value = new PlatformConfigurationEntity();
-        value.id = GLOBAL_ID;
+        value.configurationKey = GLOBAL_KEY;
         value.defaultCurrency = "INR";
         value.defaultCity = "Jaipur";
         value.economyCostPerSqFt = new BigDecimal("1400.00");
@@ -84,7 +117,7 @@ class PlatformConfigurationEntity {
         updatedAt = Instant.now();
     }
 
-    BigDecimal rate(PricingModels.PriceCategory category) {
+    BigDecimal rate(PriceCategory category) {
         return switch (category) {
             case ECONOMY -> economyCostPerSqFt;
             case STANDARD -> standardCostPerSqFt;
@@ -93,23 +126,79 @@ class PlatformConfigurationEntity {
         };
     }
 
-    private static BigDecimal money(BigDecimal value) { return value.setScale(2, java.math.RoundingMode.HALF_UP); }
-    String id() { return id; }
-    String defaultCurrency() { return defaultCurrency; }
-    String defaultCity() { return defaultCity; }
-    BigDecimal economyCostPerSqFt() { return economyCostPerSqFt; }
-    BigDecimal standardCostPerSqFt() { return standardCostPerSqFt; }
-    BigDecimal premiumCostPerSqFt() { return premiumCostPerSqFt; }
-    BigDecimal luxuryCostPerSqFt() { return luxuryCostPerSqFt; }
-    BigDecimal contingencyPercent() { return contingencyPercent; }
-    int minConfidenceSources() { return minConfidenceSources; }
-    int priceFreshnessDays() { return priceFreshnessDays; }
-    BigDecimal confidenceThreshold() { return confidenceThreshold; }
-    int recommendationValidityDays() { return recommendationValidityDays; }
-    boolean contributionsEnabled() { return contributionsEnabled; }
-    boolean aiExplanationEnabled() { return aiExplanationEnabled; }
-    boolean learningEnabled() { return learningEnabled; }
-    long configurationVersion() { return configurationVersion; }
-    UUID updatedBy() { return updatedBy; }
-    Instant updatedAt() { return updatedAt; }
+    private static BigDecimal money(BigDecimal value) {
+        return value.setScale(2, java.math.RoundingMode.HALF_UP);
+    }
+
+    String id() {
+        return configurationKey;
+    }
+
+    String defaultCurrency() {
+        return defaultCurrency;
+    }
+
+    String defaultCity() {
+        return defaultCity;
+    }
+
+    BigDecimal economyCostPerSqFt() {
+        return economyCostPerSqFt;
+    }
+
+    BigDecimal standardCostPerSqFt() {
+        return standardCostPerSqFt;
+    }
+
+    BigDecimal premiumCostPerSqFt() {
+        return premiumCostPerSqFt;
+    }
+
+    BigDecimal luxuryCostPerSqFt() {
+        return luxuryCostPerSqFt;
+    }
+
+    BigDecimal contingencyPercent() {
+        return contingencyPercent;
+    }
+
+    int minConfidenceSources() {
+        return minConfidenceSources;
+    }
+
+    int priceFreshnessDays() {
+        return priceFreshnessDays;
+    }
+
+    BigDecimal confidenceThreshold() {
+        return confidenceThreshold;
+    }
+
+    int recommendationValidityDays() {
+        return recommendationValidityDays;
+    }
+
+    boolean contributionsEnabled() {
+        return contributionsEnabled;
+    }
+
+    boolean aiExplanationEnabled() {
+        return aiExplanationEnabled;
+    }
+
+    boolean learningEnabled() {
+        return learningEnabled;
+    }
+
+    long configurationVersion() {
+        return configurationVersion;
+    }
+
+    UUID updatedBy() {
+        return updatedBy;
+    }
+
+    Instant updatedAt() {
+        return updatedAt;
+    }
 }

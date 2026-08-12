@@ -98,6 +98,7 @@ class PricingApiIntegrationTest {
         mvc.perform(get("/api/v1/admin/configuration")
                         .header("Authorization", bearer(admin)).header("X-Active-Role", "ADMIN"))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("GLOBAL"))
                 .andExpect(jsonPath("$.defaultCurrency").value("INR"))
                 .andExpect(jsonPath("$.learningEnabled").value(true));
 

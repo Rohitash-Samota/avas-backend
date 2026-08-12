@@ -8,7 +8,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-interface JpaUserRepository extends JpaRepository<UserEntity, UUID> {
+interface JpaUserRepository extends JpaRepository<UserEntity, Long> {
+    Optional<UserEntity> findByPublicId(UUID publicId);
     Optional<UserEntity> findByEmailIgnoreCase(String email);
     Optional<UserEntity> findByUsernameIgnoreCase(String username);
     Optional<UserEntity> findByMobileNumber(String mobileNumber);
@@ -18,13 +19,4 @@ interface JpaUserRepository extends JpaRepository<UserEntity, UUID> {
 
     @Query("select u from UserEntity u where lower(concat(u.firstName, ' ', u.lastName)) = lower(:fullName)")
     List<UserEntity> findByFullNameIgnoreCase(@Param("fullName") String fullName);
-}
-
-interface JpaRoleRepository extends JpaRepository<RoleEntity, Long> {
-    Optional<RoleEntity> findByCode(String code);
-}
-
-interface JpaRefreshTokenRepository extends JpaRepository<RefreshTokenEntity, UUID> {
-    Optional<RefreshTokenEntity> findByTokenHash(String tokenHash);
-    List<RefreshTokenEntity> findAllByUserIdAndRevokedAtIsNull(UUID userId);
 }

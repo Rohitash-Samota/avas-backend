@@ -17,8 +17,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static com.avas.platform.project.ProjectModels.*;
-
 @Service
 public class ProjectService {
     private final Map<String, ProjectAggregate> projects = new ConcurrentHashMap<>();
@@ -220,15 +218,44 @@ public class ProjectService {
 
     public ValidationReport validation(String drawingId) {
         var drawing = drawing(drawingId);
-        var assisted = "EXPERT_REVIEW".equals(drawing.status());
-        return new ValidationReport(drawingId, drawing.confidence(), assisted ? EngineStatus.EXPERT_REVIEW : EngineStatus.SUCCESS, List.of(
+        var hardViolations = drawing.hardViolations() == null ? List.<String>of() : drawing.hardViolations();
+        var structuralViolations = hardViolations.stream()
+                .filter(violation -> !violation.startsWith("Programme gap:"))
+                .toList();
+        var areaMismatch = hardViolations.stream()
+                .anyMatch(violation -> violation.startsWith("Programme gap: placed built-up area"));
+        var reviewRequired = "EXPERT_REVIEW".equals(drawing.status()) || !hardViolations.isEmpty();
+        var buildingDetail = hardViolations.isEmpty()
+                ? "No unresolved hard constraints in " + versions.get("ruleVersion")
+                : hardViolations.size() + " unresolved hard/programme constraint(s): "
+                        + String.join(" | ", hardViolations);
+        var geometryDetail = structuralViolations.isEmpty()
+                ? "No overlap, boundary escape or disconnected circulation"
+                : structuralViolations.size() + " unresolved geometry constraint(s): "
+                        + String.join(" | ", structuralViolations);
+        var professionalReview = new ArrayList<String>();
+        professionalReview.addAll(hardViolations);
+        professionalReview.addAll(List.of("Licensed architect review", "Structural engineer design",
+                "Local authority approval where applicable"));
+        return new ValidationReport(drawingId, drawing.confidence(),
+                reviewRequired ? EngineStatus.EXPERT_REVIEW : EngineStatus.SUCCESS, List.of(
                 new ValidationGate("Schema & units", "PASSED", "Plot, budget, units and source provenance are complete", true),
-                new ValidationGate("Building rules", "PASSED", "No unresolved hard constraints in " + versions.get("ruleVersion"), true),
-                new ValidationGate("Geometry", "PASSED", "No overlap, boundary escape or disconnected circulation", true),
-                new ValidationGate("Preliminary feasibility", "PASSED_WITH_NOTES", "Long-span and column-grid review remains professional scope", true),
-                new ValidationGate("Estimate evidence", "PASSED", "Location evidence is within the accepted freshness window", true),
+                new ValidationGate("Building rules", hardViolations.isEmpty() ? "PASSED" : "REVIEW_REQUIRED",
+                        buildingDetail, true),
+                new ValidationGate("Geometry", structuralViolations.isEmpty() ? "PASSED" : "REVIEW_REQUIRED",
+                        geometryDetail, true),
+                new ValidationGate("Preliminary feasibility", reviewRequired ? "REVIEW_REQUIRED" : "PASSED_WITH_NOTES",
+                        reviewRequired
+                                ? "Professional feasibility review is required for unresolved programme, spans, setbacks and column grid"
+                                : "Long-span and column-grid review remains professional scope",
+                        true),
+                new ValidationGate("Estimate evidence", areaMismatch ? "REVIEW_REQUIRED" : "PASSED",
+                        areaMismatch
+                                ? "Placed built-up area is outside the stored recommendation cost basis; pricing must be recalibrated before reliance"
+                                : "Location evidence is within the accepted freshness window",
+                        true),
                 new ValidationGate("Professional review", "REQUIRED", "Conceptual output cannot become construction documentation without sign-off", true)
-        ), List.of("Licensed architect review", "Structural engineer design", "Local authority approval where applicable"), versions);
+        ), List.copyOf(professionalReview), versions);
     }
 
     public synchronized Estimate generateEstimate(String projectId, String drawingId, String role) {

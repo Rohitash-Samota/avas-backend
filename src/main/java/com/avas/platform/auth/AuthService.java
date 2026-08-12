@@ -19,8 +19,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-import static com.avas.platform.auth.AuthModels.*;
-
 @Service
 public class AuthService {
     private static final SecureRandom RANDOM = new SecureRandom();

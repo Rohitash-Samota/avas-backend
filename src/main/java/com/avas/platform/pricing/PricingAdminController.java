@@ -16,17 +16,19 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.pricing.PricingModels.*;
-
 @RestController
 @RequestMapping("/api/v1/admin")
 public class PricingAdminController {
     private final PricingService pricing;
 
-    PricingAdminController(PricingService pricing) { this.pricing = pricing; }
+    PricingAdminController(PricingService pricing) {
+        this.pricing = pricing;
+    }
 
     @GetMapping("/configuration")
-    PlatformConfigurationResponse configuration() { return pricing.getConfiguration(); }
+    PlatformConfigurationResponse configuration() {
+        return pricing.getConfiguration();
+    }
 
     @PutMapping("/configuration")
     PlatformConfigurationResponse updateConfiguration(@AuthenticationPrincipal AvasPrincipal principal,
@@ -35,7 +37,9 @@ public class PricingAdminController {
     }
 
     @GetMapping("/models")
-    List<ModelReleaseResponse> models() { return pricing.modelReleases(); }
+    List<ModelReleaseResponse> models() {
+        return pricing.modelReleases();
+    }
 
     @PostMapping("/models")
     ModelReleaseResponse registerModel(@AuthenticationPrincipal AvasPrincipal principal,
@@ -57,7 +61,9 @@ public class PricingAdminController {
     }
 
     @GetMapping("/pricing/submissions")
-    List<PriceSubmissionResponse> submissions() { return pricing.allSubmissions(); }
+    List<PriceSubmissionResponse> submissions() {
+        return pricing.allSubmissions();
+    }
 
     @PutMapping("/pricing/submissions/{id}/decision")
     PriceSubmissionResponse decide(@PathVariable UUID id,

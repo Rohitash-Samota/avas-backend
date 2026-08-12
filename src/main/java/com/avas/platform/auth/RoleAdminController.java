@@ -11,9 +11,6 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.Set;
 
-import static com.avas.platform.auth.AuthModels.RoleResponse;
-import static com.avas.platform.auth.AuthModels.RoleUpdateRequest;
-
 @RestController
 @RequestMapping("/api/v1/admin/roles")
 public class RoleAdminController {

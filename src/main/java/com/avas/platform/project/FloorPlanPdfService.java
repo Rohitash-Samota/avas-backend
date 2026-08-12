@@ -20,11 +20,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-import static com.avas.platform.project.ProjectModels.DrawingCandidate;
-import static com.avas.platform.project.ProjectModels.Facing;
-import static com.avas.platform.project.ProjectModels.ProjectSummary;
-import static com.avas.platform.project.ProjectModels.RoomGeometry;
-
 /** Creates a self-contained vector PDF from the authoritative persisted drawing geometry. */
 @Service
 public class FloorPlanPdfService {

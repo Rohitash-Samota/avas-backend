@@ -78,10 +78,12 @@ class SqlIdentityMigration implements IdentityMigration {
     }
 
     private void retireLegacyDemoIdentities() {
-        var selection = "SELECT id FROM users WHERE tenant_id = 'tenant-demo' AND provisioning_source = 'MIGRATION' " +
+        var databaseIdSelection = "SELECT id FROM users WHERE tenant_id = 'tenant-demo' AND provisioning_source = 'MIGRATION' " +
                 "AND migration_version IN ('V002__first_administrator', 'V003__demo_role_identities')";
-        jdbc.update("DELETE FROM refresh_tokens WHERE user_id IN (" + selection + ")");
-        jdbc.update("DELETE FROM user_roles WHERE user_id IN (" + selection + ")");
+        var publicIdSelection = "SELECT public_id FROM users WHERE tenant_id = 'tenant-demo' AND provisioning_source = 'MIGRATION' " +
+                "AND migration_version IN ('V002__first_administrator', 'V003__demo_role_identities')";
+        jdbc.update("DELETE FROM refresh_tokens WHERE user_id IN (" + publicIdSelection + ")");
+        jdbc.update("DELETE FROM user_roles WHERE user_id IN (" + databaseIdSelection + ")");
         jdbc.update("DELETE FROM users WHERE tenant_id = 'tenant-demo' AND provisioning_source = 'MIGRATION' " +
                 "AND migration_version IN ('V002__first_administrator', 'V003__demo_role_identities')");
     }

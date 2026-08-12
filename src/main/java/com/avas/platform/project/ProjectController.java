@@ -16,7 +16,6 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 
 import java.util.List;
 
-import static com.avas.platform.project.ProjectModels.*;
 import static com.avas.platform.security.ActiveRoleFilter.ACTIVE_ROLE;
 
 @Validated

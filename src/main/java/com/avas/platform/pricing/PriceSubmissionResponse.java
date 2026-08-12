@@ -1,0 +1,75 @@
+package com.avas.platform.pricing;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.UUID;
+
+public record PriceSubmissionResponse(
+        UUID id,
+        String tenantId,
+        UUID submittedBy,
+        String submittedRole,
+        String itemName,
+        PriceItemType itemType,
+        String category,
+        PriceCategory qualityTier,
+        String city,
+        String state,
+        String unit,
+        BigDecimal unitPrice,
+        BigDecimal quantity,
+        LocalDate observedOn,
+        LocalDate effectiveFrom,
+        LocalDate expiresOn,
+        String supplierName,
+        String source,
+        String notes,
+        BigDecimal taxPercentage,
+        boolean materialIncluded,
+        boolean labourIncluded,
+        boolean transportIncluded,
+        PriceSubmissionStatus status,
+        int version,
+        UUID reviewedBy,
+        Instant reviewedAt,
+        String reviewNote,
+        String decisionNote,
+        Instant createdAt,
+        Instant submittedAt
+) {
+    static PriceSubmissionResponse from(PriceSubmissionEntity value) {
+        return new PriceSubmissionResponse(
+                value.id(),
+                value.tenantId(),
+                value.submittedBy(),
+                value.submittedRole(),
+                value.itemName(),
+                value.itemType(),
+                value.category(),
+                value.qualityTier(),
+                value.city(),
+                value.state(),
+                value.unit(),
+                value.unitPrice(),
+                value.quantity(),
+                value.observedOn(),
+                value.effectiveFrom(),
+                value.expiresOn(),
+                value.supplierName(),
+                value.source(),
+                value.notes(),
+                value.taxPercentage(),
+                value.materialIncluded(),
+                value.labourIncluded(),
+                value.transportIncluded(),
+                value.status(),
+                value.recordVersion(),
+                value.reviewedBy(),
+                value.reviewedAt(),
+                value.reviewNote(),
+                value.reviewNote(),
+                value.createdAt(),
+                value.createdAt());
+    }
+}

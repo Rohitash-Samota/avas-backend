@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static com.avas.platform.project.ProjectModels.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ProjectServiceTest {
@@ -52,7 +51,24 @@ class ProjectServiceTest {
         var estimate = service.generateEstimate(project.id(), drawings.get(1).id(), "INDIVIDUAL");
         assertThat(estimate.items()).hasSize(7);
         assertThat(estimate.low()).isLessThan(estimate.high());
-        assertThat(service.validation(drawings.get(1).id()).status()).isEqualTo(EngineStatus.EXPERT_REVIEW);
+        var validation = service.validation(drawings.get(1).id());
+        assertThat(validation.status()).isEqualTo(EngineStatus.EXPERT_REVIEW);
+        var buildingRules = validation.gates().stream()
+                .filter(gate -> gate.name().equals("Building rules")).findFirst().orElseThrow();
+        assertThat(buildingRules.status()).isEqualTo("REVIEW_REQUIRED");
+        assertThat(buildingRules.detail()).contains("unresolved hard/programme constraint")
+                .contains("Programme gap:")
+                .doesNotContain("No unresolved hard constraints");
+        var estimateEvidence = validation.gates().stream()
+                .filter(gate -> gate.name().equals("Estimate evidence")).findFirst().orElseThrow();
+        assertThat(estimateEvidence.status()).isEqualTo("REVIEW_REQUIRED");
+        assertThat(estimateEvidence.detail()).contains("outside the stored recommendation cost basis")
+                .contains("recalibrated");
+        assertThat(validation.professionalReview()).containsAll(drawings.get(1).hardViolations());
+        assertThat(drawings.get(1).hardViolations())
+                .contains("Programme gap: placed built-up area " + drawings.get(1).builtUpArea()
+                        + " sq ft is outside recommended " + recommendation.builtUpAreaMinimum() + "-"
+                        + recommendation.builtUpAreaMaximum() + " sq ft cost basis");
         assertThat(service.get(project.id()).status()).isEqualTo("REVIEW_REQUIRED");
     }
 

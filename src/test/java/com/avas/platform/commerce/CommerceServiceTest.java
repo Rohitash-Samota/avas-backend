@@ -10,7 +10,6 @@ import com.avas.platform.project.persistence.ProjectPersistenceService;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.commerce.CommerceModels.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -28,6 +27,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CommerceServiceTest {
     @Autowired private CommerceService service;
     @Autowired private ProjectPersistenceService projectPersistence;
+    @Autowired private OrderRepository orders;
+    @Autowired private PaymentRepository payments;
     private final UUID userId = UUID.randomUUID();
 
     @Test
@@ -40,6 +41,8 @@ class CommerceServiceTest {
         assertThat(checkout.order().total()).isEqualTo(30_000);
         assertThat(checkout.order().status()).isEqualTo(OrderStatus.PENDING_PAYMENT);
         assertThat(checkout.payment().mode()).isEqualTo("TEST");
+        assertThat(orders.findByPublicId(checkout.order().id()).orElseThrow().getDatabaseId()).isNotNull();
+        assertThat(payments.findByPublicId(checkout.payment().id()).orElseThrow().getDatabaseId()).isNotNull();
 
         var receipt = service.simulate(checkout.payment().id(), userId);
         assertThat(receipt.order().status()).isEqualTo(OrderStatus.PAID);

@@ -1,5 +1,6 @@
 package com.avas.platform.auth;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import jakarta.persistence.*;
 
 import java.time.Instant;
@@ -13,13 +14,13 @@ import java.util.UUID;
         @Index(name = "idx_users_tenant", columnList = "tenantId"),
         @Index(name = "idx_users_mobile", columnList = "mobileNumber")
 })
-public class UserEntity {
+public class UserEntity extends AbstractLongIdEntity {
     public enum AuthProvider {
         LOCAL, GOOGLE
     }
 
-    @Id
-    private UUID id;
+    @Column(name = "public_id", nullable = false, unique = true, updatable = false)
+    private UUID publicId;
 
     @Column(nullable = false, length = 60)
     private String tenantId;
@@ -71,7 +72,7 @@ public class UserEntity {
     public UserEntity(String tenantId, String firstName, String lastName, String username, String email,
             String mobileNumber,
             String passwordHash, AuthProvider provider, RoleEntity initialRole) {
-        this.id = UUID.randomUUID();
+        this.publicId = UUID.randomUUID();
         this.tenantId = tenantId;
         this.firstName = firstName;
         this.lastName = lastName;
@@ -91,7 +92,7 @@ public class UserEntity {
             Set<RoleEntity> roles, Instant createdAt, Instant updatedAt, String provisioningSource,
             String migrationVersion) {
         var user = new UserEntity();
-        user.id = id;
+        user.publicId = id;
         user.tenantId = tenantId;
         user.firstName = firstName;
         user.lastName = lastName;
@@ -139,7 +140,7 @@ public class UserEntity {
     }
 
     public UUID getId() {
-        return id;
+        return publicId;
     }
 
     public String getTenantId() {

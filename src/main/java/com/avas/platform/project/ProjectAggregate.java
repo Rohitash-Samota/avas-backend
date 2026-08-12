@@ -4,8 +4,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-import static com.avas.platform.project.ProjectModels.*;
-
 final class ProjectAggregate {
     final String id;
     final String code;

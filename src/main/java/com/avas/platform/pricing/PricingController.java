@@ -15,14 +15,14 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.pricing.PricingModels.*;
-
 @RestController
 @RequestMapping("/api/v1/pricing")
 public class PricingController {
     private final PricingService pricing;
 
-    PricingController(PricingService pricing) { this.pricing = pricing; }
+    PricingController(PricingService pricing) {
+        this.pricing = pricing;
+    }
 
     @PostMapping("/submissions")
     PriceSubmissionResponse submit(@AuthenticationPrincipal AvasPrincipal principal,

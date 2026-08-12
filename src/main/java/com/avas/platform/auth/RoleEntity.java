@@ -1,5 +1,6 @@
 package com.avas.platform.auth;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -9,19 +10,12 @@ import jakarta.persistence.Column;
 import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 
 @Entity
 @Table(name = "roles")
-public class RoleEntity {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
+public class RoleEntity extends AbstractLongIdEntity {
     @Column(nullable = false, unique = true, length = 40)
     private String code;
 
@@ -61,10 +55,6 @@ public class RoleEntity {
     public void configure(boolean active, Set<String> permissions) {
         this.active = active;
         this.permissions = new LinkedHashSet<>(permissions);
-    }
-
-    public Long getId() {
-        return id;
     }
 
     public String getCode() {

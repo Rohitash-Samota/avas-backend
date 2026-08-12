@@ -1,11 +1,12 @@
 package com.avas.platform.project.persistence;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import jakarta.persistence.*;
 import java.time.Instant;
 
 @Entity @Table(name = "project_state_snapshots")
-class ProjectStateEntity {
-    @Id @Column(length = 80) private String projectId;
+class ProjectStateEntity extends AbstractLongIdEntity {
+    @Column(name = "project_id", nullable = false, unique = true, length = 80) private String projectId;
     @Lob @Column(nullable = false, columnDefinition = "LONGTEXT") private String payloadJson;
     @Column(nullable = false) private Instant updatedAt;
     protected ProjectStateEntity() {}

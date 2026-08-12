@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
-import static com.avas.platform.project.ProjectModels.*;
 import static com.avas.platform.security.ActiveRoleFilter.ACTIVE_ROLE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

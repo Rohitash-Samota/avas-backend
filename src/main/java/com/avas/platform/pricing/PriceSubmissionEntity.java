@@ -1,10 +1,10 @@
 package com.avas.platform.pricing;
 
+import com.avas.platform.common.persistence.AbstractLongIdEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 
@@ -13,48 +13,103 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
-import static com.avas.platform.pricing.PricingModels.*;
-
 @Entity
 @Table(name = "price_submissions", indexes = {
         @Index(name = "idx_price_submission_user", columnList = "submittedBy,createdAt"),
         @Index(name = "idx_price_submission_lookup", columnList = "status,city,category,itemType")
 })
-class PriceSubmissionEntity {
-    @Id private UUID id;
-    @Column(nullable = false, length = 60) private String tenantId;
-    @Column(nullable = false) private UUID submittedBy;
-    @Column(nullable = false, length = 40) private String submittedRole;
-    @Column(nullable = false, length = 160) private String itemName;
-    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 40) private PriceItemType itemType;
-    @Column(nullable = false, length = 40) private String category;
-    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 30) private PriceCategory qualityTier;
-    @Column(nullable = false, length = 100) private String city;
-    @Column(length = 100) private String state;
-    @Column(nullable = false, length = 40) private String unit;
-    @Column(nullable = false, precision = 19, scale = 2) private BigDecimal unitPrice;
-    @Column(precision = 19, scale = 3) private BigDecimal quantity;
-    @Column(nullable = false) private LocalDate observedOn;
-    @Column(nullable = false) private LocalDate effectiveFrom;
+class PriceSubmissionEntity extends AbstractLongIdEntity {
+    @Column(name = "public_id", nullable = false, unique = true, updatable = false)
+    private UUID publicId;
+
+    @Column(nullable = false, length = 60)
+    private String tenantId;
+
+    @Column(nullable = false)
+    private UUID submittedBy;
+
+    @Column(nullable = false, length = 40)
+    private String submittedRole;
+
+    @Column(nullable = false, length = 160)
+    private String itemName;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 40)
+    private PriceItemType itemType;
+
+    @Column(nullable = false, length = 40)
+    private String category;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
+    private PriceCategory qualityTier;
+
+    @Column(nullable = false, length = 100)
+    private String city;
+
+    @Column(length = 100)
+    private String state;
+
+    @Column(nullable = false, length = 40)
+    private String unit;
+
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal unitPrice;
+
+    @Column(precision = 19, scale = 3)
+    private BigDecimal quantity;
+
+    @Column(nullable = false)
+    private LocalDate observedOn;
+
+    @Column(nullable = false)
+    private LocalDate effectiveFrom;
+
     private LocalDate expiresOn;
-    @Column(length = 160) private String supplierName;
-    @Column(length = 160) private String source;
-    @Column(length = 1000) private String notes;
-    @Column(precision = 6, scale = 2) private BigDecimal taxPercentage;
-    @Column(nullable = false) private boolean materialIncluded;
-    @Column(nullable = false) private boolean labourIncluded;
-    @Column(nullable = false) private boolean transportIncluded;
-    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20) private PriceSubmissionStatus status;
-    @Column(nullable = false) private int recordVersion;
+
+    @Column(length = 160)
+    private String supplierName;
+
+    @Column(length = 160)
+    private String source;
+
+    @Column(length = 1000)
+    private String notes;
+
+    @Column(precision = 6, scale = 2)
+    private BigDecimal taxPercentage;
+
+    @Column(nullable = false)
+    private boolean materialIncluded;
+
+    @Column(nullable = false)
+    private boolean labourIncluded;
+
+    @Column(nullable = false)
+    private boolean transportIncluded;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private PriceSubmissionStatus status;
+
+    @Column(nullable = false)
+    private int recordVersion;
+
     private UUID reviewedBy;
     private Instant reviewedAt;
-    @Column(length = 1000) private String reviewNote;
-    @Column(nullable = false, updatable = false) private Instant createdAt;
 
-    protected PriceSubmissionEntity() {}
+    @Column(length = 1000)
+    private String reviewNote;
+
+    @Column(nullable = false, updatable = false)
+    private Instant createdAt;
+
+    protected PriceSubmissionEntity() {
+    }
 
     PriceSubmissionEntity(String tenantId, UUID submittedBy, String submittedRole, PriceSubmissionRequest request) {
-        id = UUID.randomUUID();
+        publicId = UUID.randomUUID();
         this.tenantId = tenantId;
         this.submittedBy = submittedBy;
         this.submittedRole = submittedRole;
@@ -96,10 +151,18 @@ class PriceSubmissionEntity {
                 && !observedOn.isBefore(today.minusDays(freshnessDays));
     }
 
-    private static BigDecimal money(BigDecimal value) { return value.setScale(2, java.math.RoundingMode.HALF_UP); }
-    private static String clean(String value) { return value == null || value.isBlank() ? null : value.trim(); }
+    private static BigDecimal money(BigDecimal value) {
+        return value.setScale(2, java.math.RoundingMode.HALF_UP);
+    }
+
+    private static String clean(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
+    }
+
     private static PriceItemType inferItemType(String category, String unit) {
-        if ("COST_PER_SQFT".equals(category)) return PriceItemType.COST_PER_SQFT;
+        if ("COST_PER_SQFT".equals(category)) {
+            return PriceItemType.COST_PER_SQFT;
+        }
         return switch (category) {
             case "LABOUR" -> PriceItemType.LABOUR;
             case "SERVICE", "EQUIPMENT" -> PriceItemType.SERVICE;
@@ -108,33 +171,119 @@ class PriceSubmissionEntity {
         };
     }
 
-    UUID id() { return id; }
-    String tenantId() { return tenantId; }
-    UUID submittedBy() { return submittedBy; }
-    String submittedRole() { return submittedRole; }
-    String itemName() { return itemName; }
-    PriceItemType itemType() { return itemType; }
-    String category() { return category; }
-    PriceCategory qualityTier() { return qualityTier; }
-    String city() { return city; }
-    String state() { return state; }
-    String unit() { return unit; }
-    BigDecimal unitPrice() { return unitPrice; }
-    BigDecimal quantity() { return quantity; }
-    LocalDate observedOn() { return observedOn; }
-    LocalDate effectiveFrom() { return effectiveFrom; }
-    LocalDate expiresOn() { return expiresOn; }
-    String supplierName() { return supplierName; }
-    String source() { return source; }
-    String notes() { return notes; }
-    BigDecimal taxPercentage() { return taxPercentage; }
-    boolean materialIncluded() { return materialIncluded; }
-    boolean labourIncluded() { return labourIncluded; }
-    boolean transportIncluded() { return transportIncluded; }
-    PriceSubmissionStatus status() { return status; }
-    int recordVersion() { return recordVersion; }
-    UUID reviewedBy() { return reviewedBy; }
-    Instant reviewedAt() { return reviewedAt; }
-    String reviewNote() { return reviewNote; }
-    Instant createdAt() { return createdAt; }
+    UUID id() {
+        return publicId;
+    }
+
+    String tenantId() {
+        return tenantId;
+    }
+
+    UUID submittedBy() {
+        return submittedBy;
+    }
+
+    String submittedRole() {
+        return submittedRole;
+    }
+
+    String itemName() {
+        return itemName;
+    }
+
+    PriceItemType itemType() {
+        return itemType;
+    }
+
+    String category() {
+        return category;
+    }
+
+    PriceCategory qualityTier() {
+        return qualityTier;
+    }
+
+    String city() {
+        return city;
+    }
+
+    String state() {
+        return state;
+    }
+
+    String unit() {
+        return unit;
+    }
+
+    BigDecimal unitPrice() {
+        return unitPrice;
+    }
+
+    BigDecimal quantity() {
+        return quantity;
+    }
+
+    LocalDate observedOn() {
+        return observedOn;
+    }
+
+    LocalDate effectiveFrom() {
+        return effectiveFrom;
+    }
+
+    LocalDate expiresOn() {
+        return expiresOn;
+    }
+
+    String supplierName() {
+        return supplierName;
+    }
+
+    String source() {
+        return source;
+    }
+
+    String notes() {
+        return notes;
+    }
+
+    BigDecimal taxPercentage() {
+        return taxPercentage;
+    }
+
+    boolean materialIncluded() {
+        return materialIncluded;
+    }
+
+    boolean labourIncluded() {
+        return labourIncluded;
+    }
+
+    boolean transportIncluded() {
+        return transportIncluded;
+    }
+
+    PriceSubmissionStatus status() {
+        return status;
+    }
+
+    int recordVersion() {
+        return recordVersion;
+    }
+
+    UUID reviewedBy() {
+        return reviewedBy;
+    }
+
+    Instant reviewedAt() {
+        return reviewedAt;
+    }
+
+    String reviewNote() {
+        return reviewNote;
+    }
+
+    Instant createdAt() {
+        return createdAt;
+    }
 }

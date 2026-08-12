@@ -11,8 +11,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
-import static com.avas.platform.project.ProjectModels.*;
-
 /**
  * Native deterministic geometry engine. Keeping this inside the platform API makes layouts,
  * validation and workflow versioning one transactional backend concern.
@@ -49,16 +47,16 @@ class GeometryEngine {
             var rooms = packRooms(details.plotWidth(), details.plotLength(), details.floors(), strategy,
                     recommendation);
             var doors = doorsFor(rooms, details.roadFacing());
-            var windows = windowsFor(rooms);
-            var violations = new ArrayList<>(validate(details.plotWidth(), details.plotLength(), rooms));
-            violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
-            var programmeGaps = programmeGaps(recommendation, rooms);
-            violations.addAll(programmeGaps);
-            var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
+            var windows = windowsFor(rooms, doors);
             // Rooms already contain every requested floor, so this is an aggregate area and must
             // not be multiplied by the floor count a second time.
             var aggregateProgramArea = rooms.stream().mapToDouble(RoomGeometry::area).sum();
             var builtUpArea = (int) Math.round(aggregateProgramArea);
+            var violations = new ArrayList<>(validate(details.plotWidth(), details.plotLength(), rooms));
+            violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
+            var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea);
+            violations.addAll(programmeGaps);
+            var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
             var provenance = new LinkedHashMap<>(versions);
             provenance.put("generator", "AVAS deterministic layout engine");
             provenance.put("generationMode", "DETERMINISTIC");
@@ -100,7 +98,7 @@ class GeometryEngine {
         return List.copyOf(candidates);
     }
 
-    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms) {
+    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms, int builtUpArea) {
         var gaps = new ArrayList<String>();
         var bedrooms = rooms.stream().filter(room -> room.type().contains("BEDROOM")).count();
         var attachedBathrooms = rooms.stream().filter(room -> room.type().contains("ATTACHED_BATHROOM")).count();
@@ -134,6 +132,12 @@ class GeometryEngine {
                 && rooms.stream().noneMatch(room -> room.type().contains("TERRACE")
                         || room.type().contains("BALCONY") || room.type().contains("FUTURE_EXPANSION"))) {
             gaps.add("Programme gap: recommended future-expansion zone is not represented");
+        }
+        if (builtUpArea < recommendation.builtUpAreaMinimum()
+                || builtUpArea > recommendation.builtUpAreaMaximum()) {
+            gaps.add("Programme gap: placed built-up area " + builtUpArea + " sq ft is outside recommended "
+                    + recommendation.builtUpAreaMinimum() + "-" + recommendation.builtUpAreaMaximum()
+                    + " sq ft cost basis");
         }
         return List.copyOf(gaps);
     }
@@ -182,6 +186,7 @@ class GeometryEngine {
         if (!representedFloors.equals(expectedFloors)) {
             violations.add("Geometry floors " + representedFloors + " do not match requested floors " + expectedFloors);
         }
+        validateStairCores(expectedFloors, rooms, violations);
         var envelopes = new LinkedHashMap<String, Envelope>();
         for (var floor : representedFloors) {
             envelopes.put(floor, envelopeFor(rooms.stream()
@@ -189,8 +194,37 @@ class GeometryEngine {
         }
         validateDoors(doors, roomsById, envelopes, violations);
         validateWindows(windows, roomsById, envelopes, violations);
+        validateOpeningSeparation(doors, windows, violations);
         validateConnectivity(rooms, doors, violations);
         return List.copyOf(violations);
+    }
+
+    private void validateStairCores(LinkedHashSet<String> expectedFloors, List<RoomGeometry> rooms,
+            List<String> violations) {
+        RoomGeometry reference = null;
+        for (var floor : expectedFloors) {
+            var stairs = rooms.stream()
+                    .filter(room -> floor.equals(normalizedFloor(room.floor())))
+                    .filter(room -> "STAIRCASE".equals(room.type()))
+                    .toList();
+            if (stairs.size() != 1) {
+                violations.add(floor + " floor requires exactly one STAIRCASE; found " + stairs.size());
+                continue;
+            }
+            if (reference == null) {
+                reference = stairs.getFirst();
+            } else if (!sameBounds(reference, stairs.getFirst())) {
+                violations.add("Stair cores are not vertically aligned: " + reference.id()
+                        + " differs from " + stairs.getFirst().id());
+            }
+        }
+    }
+
+    private boolean sameBounds(RoomGeometry first, RoomGeometry second) {
+        return Math.abs(first.x() - second.x()) <= .02
+                && Math.abs(first.y() - second.y()) <= .02
+                && Math.abs(first.width() - second.width()) <= .02
+                && Math.abs(first.length() - second.length()) <= .02;
     }
 
     private void validateDoors(List<Map<String, Object>> doors, Map<String, RoomGeometry> roomsById,
@@ -302,6 +336,21 @@ class GeometryEngine {
         }
     }
 
+    private void validateOpeningSeparation(List<Map<String, Object>> doors, List<Map<String, Object>> windows,
+            List<String> violations) {
+        for (var door : doors) {
+            var doorInterval = openingInterval(door);
+            if (doorInterval == null) continue;
+            for (var window : windows) {
+                var windowInterval = openingInterval(window);
+                if (windowInterval != null && openingIntervalsOverlap(doorInterval, windowInterval)) {
+                    violations.add("Door " + doorInterval.id() + " overlaps window " + windowInterval.id()
+                            + " on the same wall");
+                }
+            }
+        }
+    }
+
     private void validateOpeningOnRoom(String kind, String id, RoomGeometry room, String orientation,
             double x, double y, double width, List<String> violations) {
         var horizontal = "NORTH".equals(orientation) || "SOUTH".equals(orientation);
@@ -345,6 +394,27 @@ class GeometryEngine {
     private String physicalOpeningKey(String floor, String orientation, double x, double y) {
         var axis = "NORTH".equals(orientation) || "SOUTH".equals(orientation) ? "H" : "V";
         return floor + "|" + axis + "|" + round2(x) + "|" + round2(y);
+    }
+
+    private OpeningInterval openingInterval(Map<String, Object> opening) {
+        var orientation = orientation(opening);
+        var x = number(opening.get("x"));
+        var y = number(opening.get("y"));
+        var width = number(opening.get("width"));
+        if (orientation == null || !Double.isFinite(x) || !Double.isFinite(y)
+                || !Double.isFinite(width) || width <= 0) return null;
+        var horizontal = "NORTH".equals(orientation) || "SOUTH".equals(orientation);
+        var center = horizontal ? x : y;
+        return new OpeningInterval(
+                normalizedFloor(opening.get("floor") == null ? null : opening.get("floor").toString()),
+                horizontal ? "H" : "V", horizontal ? y : x, center - width / 2, center + width / 2,
+                String.valueOf(opening.get("id")));
+    }
+
+    private boolean openingIntervalsOverlap(OpeningInterval first, OpeningInterval second) {
+        return first.floor().equals(second.floor()) && first.axis().equals(second.axis())
+                && Math.abs(first.wallLine() - second.wallLine()) <= .02
+                && Math.max(first.from(), second.from()) < Math.min(first.to(), second.to()) - .02;
     }
 
     private void validateConnectivity(List<RoomGeometry> rooms, List<Map<String, Object>> doors,
@@ -708,7 +778,7 @@ class GeometryEngine {
         return null;
     }
 
-    private List<Map<String, Object>> windowsFor(List<RoomGeometry> rooms) {
+    private List<Map<String, Object>> windowsFor(List<RoomGeometry> rooms, List<Map<String, Object>> doors) {
         var windows = new ArrayList<Map<String, Object>>();
         for (var floor : rooms.stream().map(RoomGeometry::floor).distinct().toList()) {
             var floorRooms = rooms.stream().filter(room -> floor.equals(room.floor())).toList();
@@ -719,21 +789,44 @@ class GeometryEngine {
                         || room.type().contains("TERRACE") || room.type().contains("BALCONY")) continue;
                 var sides = exteriorSides(room, envelope);
                 if (sides.isEmpty()) continue;
-                var orientation = sides.getFirst();
-                var horizontal = "NORTH".equals(orientation) || "SOUTH".equals(orientation);
-                var wallLength = horizontal ? room.width() : room.length();
-                var window = opening(floorPrefixFor(floor) + "-W" + windowNumber++, room, orientation,
-                        horizontal ? room.x() + room.width() * .3
-                                : "WEST".equals(orientation) ? room.x() : room.x() + room.width(),
-                        horizontal
-                                ? "NORTH".equals(orientation) ? room.y() : room.y() + room.length()
-                                : room.y() + room.length() * .3,
-                        Math.min(4.0, Math.max(2.5, wallLength * .28)));
-                window.remove("swing");
-                windows.add(Map.copyOf(window));
+                var window = exteriorWindow(room, sides, doors,
+                        floorPrefixFor(floor) + "-W" + windowNumber);
+                if (window != null) {
+                    windows.add(window);
+                    windowNumber++;
+                }
             }
         }
         return List.copyOf(windows);
+    }
+
+    private Map<String, Object> exteriorWindow(RoomGeometry room, List<String> sides,
+            List<Map<String, Object>> doors, String id) {
+        for (var orientation : sides) {
+            var horizontal = "NORTH".equals(orientation) || "SOUTH".equals(orientation);
+            var wallLength = horizontal ? room.width() : room.length();
+            var width = round2(Math.min(4.0, Math.max(2.5, wallLength * .28)));
+            var start = horizontal ? room.x() : room.y();
+            for (var ratio : List.of(.20, .80, .35, .65, .50)) {
+                var center = start + wallLength * ratio;
+                if (center - width / 2 < start - .01 || center + width / 2 > start + wallLength + .01) {
+                    continue;
+                }
+                var candidate = opening(id, room, orientation,
+                        horizontal ? center : "WEST".equals(orientation) ? room.x() : room.x() + room.width(),
+                        horizontal
+                                ? "NORTH".equals(orientation) ? room.y() : room.y() + room.length()
+                                : center,
+                        width);
+                candidate.remove("swing");
+                var interval = openingInterval(candidate);
+                var collides = interval != null && doors.stream().map(this::openingInterval)
+                        .filter(Objects::nonNull)
+                        .anyMatch(door -> openingIntervalsOverlap(door, interval));
+                if (!collides) return Map.copyOf(candidate);
+            }
+        }
+        return null;
     }
 
     private Envelope envelopeFor(List<RoomGeometry> rooms) {
@@ -772,6 +865,7 @@ class GeometryEngine {
     private record Strategy(String key, String name, double columnSplit, double rowSplit,
             int vastuScore, int naturalLightScore, int spaceEfficiencyScore, List<String> explanations) {}
     private record Envelope(double minimumX, double maximumX, double minimumY, double maximumY) {}
+    private record OpeningInterval(String floor, String axis, double wallLine, double from, double to, String id) {}
     private record SharedEdge(RoomGeometry first, RoomGeometry second, String orientationFromFirst,
             double x, double y, double span, double from, double to, boolean vertical) {
         RoomGeometry other(RoomGeometry room) {

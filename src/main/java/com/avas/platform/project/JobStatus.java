@@ -1,0 +1,15 @@
+package com.avas.platform.project;
+
+public enum JobStatus {
+    QUEUED,
+    REQUIREMENTS_PROCESSING,
+    GENERATING_SPACE_PROGRAMME,
+    GENERATING_LAYOUTS,
+    OPTIMIZING_LAYOUTS,
+    VALIDATING,
+    RENDERING,
+    GENERATING_ESTIMATE,
+    COMPLETED,
+    REVIEW_REQUIRED,
+    FAILED
+}

@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import static com.avas.platform.project.ProjectModels.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class GeometryEngineTest {
@@ -26,6 +25,9 @@ class GeometryEngineTest {
                 assertThat(candidate.hardViolations())
                         .contains("Programme gap: " + (floors == 1 ? 0 : 1)
                                 + " of 3 recommended attached bathrooms represented");
+                assertThat(candidate.hardViolations())
+                        .contains("Programme gap: placed built-up area " + candidate.builtUpArea()
+                                + " sq ft is outside recommended 2400-2800 sq ft cost basis");
                 if (floors == 1) {
                     assertThat(candidate.hardViolations())
                             .contains("Programme gap: recommended family lounge is not represented")
@@ -131,6 +133,66 @@ class GeometryEngineTest {
                 .anyMatch(value -> value.contains("not contained by the referenced room perimeter"))
                 .anyMatch(value -> value.contains("Duplicate door on shared room edge"))
                 .anyMatch(value -> value.contains("window") && value.contains("exterior building envelope"));
+
+        var exteriorDoor = drawing.geometry().doors().stream()
+                .filter(opening -> opening.get("connectsRoomId") == null)
+                .findFirst().orElseThrow();
+        var collidingWindow = new java.util.LinkedHashMap<>(drawing.geometry().windows().getFirst());
+        collidingWindow.put("id", "BROKEN-DOOR-WINDOW-COLLISION");
+        collidingWindow.put("roomId", exteriorDoor.get("roomId"));
+        collidingWindow.put("floor", exteriorDoor.get("floor"));
+        collidingWindow.put("orientation", exteriorDoor.get("orientation"));
+        collidingWindow.put("x", exteriorDoor.get("x"));
+        collidingWindow.put("y", exteriorDoor.get("y"));
+        collidingWindow.put("width", 2.5);
+        collidingWindow.remove("swing");
+        var collidingWindows = new java.util.ArrayList<>(drawing.geometry().windows());
+        collidingWindows.set(0, Map.copyOf(collidingWindow));
+        assertThat(engine.validateDocument(2, drawing.geometry().rooms(), drawing.geometry().doors(),
+                collidingWindows)).anyMatch(value -> value.contains("overlaps window")
+                        && value.contains("same wall"));
+    }
+
+    @Test
+    void keepsGeneratedDoorsAndWindowsSeparatedForEveryRoadFacing() {
+        for (var facing : Facing.values()) {
+            var drawing = engine.generate("project-facing-" + facing, 1, details(40, 2, facing),
+                    recommendation(), versions()).getFirst();
+            assertThat(engine.validateDocument(2, drawing.geometry().rooms(), drawing.geometry().doors(),
+                    drawing.geometry().windows())).isEmpty();
+        }
+    }
+
+    @Test
+    void rejectsMissingDuplicateAndMisalignedStairCores() {
+        var drawing = engine.generate("project-stairs", 1, details(40, 3), recommendation(), versions()).getFirst();
+        var geometry = drawing.geometry();
+
+        var missing = geometry.rooms().stream().map(room -> room.floor().equals("GROUND")
+                        && room.type().equals("STAIRCASE") ? withType(room, "STORAGE") : room)
+                .toList();
+        assertThat(engine.validateDocument(3, missing, geometry.doors(), geometry.windows()))
+                .anyMatch(value -> value.contains("GROUND floor requires exactly one STAIRCASE; found 0"));
+
+        var duplicate = geometry.rooms().stream().map(room -> room.id().equals("F1-R1")
+                        ? withType(room, "STAIRCASE") : room)
+                .toList();
+        assertThat(engine.validateDocument(3, duplicate, geometry.doors(), geometry.windows()))
+                .anyMatch(value -> value.contains("FIRST floor requires exactly one STAIRCASE; found 2"));
+
+        var moved = geometry.rooms().stream().map(room -> room.floor().equals("GROUND")
+                        && room.type().equals("STAIRCASE")
+                        ? new RoomGeometry(room.id(), room.type(), room.x() + 1, room.y(), room.width(),
+                                room.length(), room.area(), room.floor())
+                        : room)
+                .toList();
+        assertThat(engine.validateDocument(3, moved, geometry.doors(), geometry.windows()))
+                .anyMatch(value -> value.contains("Stair cores are not vertically aligned"));
+    }
+
+    private RoomGeometry withType(RoomGeometry room, String type) {
+        return new RoomGeometry(room.id(), type, room.x(), room.y(), room.width(), room.length(), room.area(),
+                room.floor());
     }
 
     private double widthOf(DrawingCandidate drawing, String floor, int roomNumber) {
@@ -140,7 +202,11 @@ class GeometryEngineTest {
     }
 
     private BasicDetailsRequest details(double width, int floors) {
-        return new BasicDetailsRequest(width, 60, Facing.NORTH, "Jaipur", floors, 7_000_000,
+        return details(width, floors, Facing.NORTH);
+    }
+
+    private BasicDetailsRequest details(double width, int floors, Facing facing) {
+        return new BasicDetailsRequest(width, 60, facing, "Jaipur", floors, 7_000_000,
                 Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
     }
 

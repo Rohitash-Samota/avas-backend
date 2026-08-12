@@ -14,7 +14,7 @@ class JpaIdentityUserStore implements IdentityUserStore {
 
     JpaIdentityUserStore(JpaUserRepository repository) { this.repository = repository; }
     public UserEntity save(UserEntity user) { return repository.save(user); }
-    public Optional<UserEntity> findById(UUID id) { return repository.findById(id); }
+    public Optional<UserEntity> findById(UUID id) { return repository.findByPublicId(id); }
     public List<UserEntity> findAll() { return repository.findAll(); }
     public Optional<UserEntity> findByEmailIgnoreCase(String email) { return repository.findByEmailIgnoreCase(email); }
     public Optional<UserEntity> findByUsernameIgnoreCase(String username) { return repository.findByUsernameIgnoreCase(username); }

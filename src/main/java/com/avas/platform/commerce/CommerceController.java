@@ -10,8 +10,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
-import static com.avas.platform.commerce.CommerceModels.*;
-
 @RestController
 @RequestMapping("/api/v1/commerce")
 public class CommerceController {
