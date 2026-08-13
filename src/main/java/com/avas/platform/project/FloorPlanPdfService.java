@@ -588,13 +588,18 @@ public class FloorPlanPdfService {
                 || room.type().contains("TOILET")).count();
         var doors = openingsForFloor(drawing.geometry().doors(), floor).size();
         var windows = openingsForFloor(drawing.geometry().windows(), floor).size();
+        var versions = versions(drawing);
+        var balconies = drawing.geometry().rooms().stream()
+                .filter(room -> "BALCONY".equals(room.type())).count();
         summaryCell(canvas, "PLAN HIGHLIGHTS",
                 bedrooms + " bedroom" + (bedrooms == 1 ? "" : "s") + " | " + bathrooms + " bathroom"
                         + (bathrooms == 1 ? "" : "s"),
                 rooms.size() + " spaces | " + doors + " doors | " + windows + " windows",
                 x, y + provenanceHeight,
                 firstWidth, height - provenanceHeight);
-        summaryCell(canvas, "EST. BUILD COST", lakhRange(drawing), "Planning range",
+        summaryCell(canvas, "EST. BUILD COST", lakhRange(drawing),
+                titleCase(versions.getOrDefault("liftProvision", "NONE")) + " | " + balconies
+                        + " balcon" + (balconies == 1 ? "y" : "ies"),
                 x + firstWidth, y + provenanceHeight, secondWidth, height - provenanceHeight);
         summaryCell(canvas, "ORIENTATION", titleCase(drawingFacing(project, drawing).name()) + " facing",
                 floorTitle(floor) + " | Sheet " + sheetNumber + " of " + sheetCount,
@@ -603,7 +608,6 @@ public class FloorPlanPdfService {
 
         fill(canvas, PAPER, x + 1, y + 1, width - 2, provenanceHeight - 1);
         text(canvas, BOLD, 4.8f, CORAL, "SERVER VECTOR RENDER", x + 9, y + 7);
-        var versions = versions(drawing);
         var provenance = versions.getOrDefault("parameterProvider", "DETERMINISTIC") + " parameters"
                 + " | " + versions.getOrDefault("parameterModel", "avas-parameter-rules")
                 + " | fallback " + versions.getOrDefault("parameterFallback", "false")

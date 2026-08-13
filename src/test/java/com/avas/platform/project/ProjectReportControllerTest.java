@@ -34,7 +34,8 @@ class ProjectReportControllerTest {
                 "layout-heuristic-1.5.0", "planning-estimate-2.0.0");
         var comparisons = new ProjectComparisonService(projects);
         var reports = new ProjectReportPdfService(new FloorPlanPdfService(),
-                new ComparisonPdfPageRenderer(), new CostBreakdownPdfPageRenderer());
+                new RecommendationPdfPageRenderer(), new ComparisonPdfPageRenderer(),
+                new CostBreakdownPdfPageRenderer());
         controller = new ProjectReportController(projects, comparisons, reports);
         owner = UUID.randomUUID();
         var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL",

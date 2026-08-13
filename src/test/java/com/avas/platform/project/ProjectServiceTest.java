@@ -30,6 +30,24 @@ class ProjectServiceTest {
     }
 
     @Test
+    void usesAdultHeadcountAndKeepsRegularGuestsAsAPreferredFlexRoom() {
+        var project = service.create(new CreateProjectRequest("Shared family home", StartMode.PLOT),
+                "INDIVIDUAL");
+        var details = new BasicDetailsRequest(45, 65, Facing.EAST, "Jaipur", 2, 8_000_000,
+                Category.PREMIUM, new FamilyDetails(6, 0, 0, true), List.of("Natural light"));
+        service.updateBasicDetails(project.id(), details, "INDIVIDUAL");
+
+        var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
+
+        assertThat(recommendation.bedrooms()).isEqualTo(3);
+        assertThat(recommendation.reasons())
+                .anyMatch(reason -> reason.contains("6 permanent family members require 3 core bedrooms"))
+                .anyMatch(reason -> reason.contains("preferred flex/guest room"));
+        assertThat(recommendation.provenance())
+                .containsEntry("method", "deterministic-recommendation-1.2");
+    }
+
+    @Test
     void producesThreeVersionedValidatedCandidatesAndEstimate() {
         var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
         service.updateBasicDetails(project.id(), details(), "INDIVIDUAL");

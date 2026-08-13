@@ -62,13 +62,16 @@ class GeometryEngineTest {
                     assertThat(room.type()).isEqualTo("SENIOR_BEDROOM");
                 });
                 assertThat(geometry.rooms().stream().filter(room -> room.type().equals("STAIRCASE")))
-                        .hasSize(floors);
-                assertThat(geometry.rooms().stream().filter(room -> room.type().equals("STAIRCASE"))
-                        .map(room -> List.of(room.x(), room.y(), room.width(), room.length())).distinct())
-                        .hasSize(1);
+                        .hasSize(floors == 1 ? 0 : floors);
+                if (floors > 1) {
+                    assertThat(geometry.rooms().stream().filter(room -> room.type().equals("STAIRCASE"))
+                            .map(room -> List.of(room.x(), room.y(), room.width(), room.length())).distinct())
+                            .hasSize(1);
+                }
                 if (floors == 1) {
                     assertThat(geometry.rooms()).extracting(RoomGeometry::type)
-                            .contains("PARKING", "LIVING_ROOM", "DINING", "KITCHEN", "BATHROOM");
+                            .contains("PARKING", "LIVING_ROOM", "DINING", "KITCHEN", "BATHROOM", "STORE")
+                            .doesNotContain("STAIRCASE", "LIFT_SHAFT");
                 }
                 assertThat(candidate.versions())
                         .containsEntry("generator", "AVAS deterministic layout engine")
@@ -222,6 +225,47 @@ class GeometryEngineTest {
                 .containsEntry("staircaseType", "U_SHAPED")
                 .containsEntry("liftProvision", "PASSENGER")
                 .containsEntry("parameterSchemaVersion", "home-parameters-1");
+    }
+
+    @Test
+    void preservesExplicitNoLiftBalconyTerraceAndCourtyardAcrossVariants() {
+        var base = details(40, 3, Facing.NORTH);
+        var explicit = new BasicDetailsRequest(base.plotWidth(), base.plotLength(), base.roadFacing(),
+                base.city(), base.floors(), base.budget(), base.category(), base.family(),
+                base.preferences(), new HomeParameters("MULTI_STOREY", "DOG_LEGGED", "NONE", 0,
+                        false, false, false, 1, false, false));
+        var parameters = PlanningParameterSet.deterministic(explicit, null);
+
+        assertThat(parameters.variants()).allSatisfy(variant -> {
+            assertThat(variant.liftProvision()).isEqualTo("NONE");
+            assertThat(variant.balconyCount()).isZero();
+            assertThat(variant.terraceRequired()).isFalse();
+            assertThat(variant.courtyardRequired()).isFalse();
+            assertThat(variant.roomTargets()).noneMatch(target -> List.of(
+                    "LIFT_SHAFT", "BALCONY", "TERRACE", "COURTYARD").contains(target.roomType()));
+        });
+
+        var drawing = engine.generate("project-explicit-none", 1, explicit, recommendation(), versions(),
+                parameters).get(2);
+        assertThat(drawing.geometry().rooms()).noneMatch(room -> List.of(
+                "LIFT_SHAFT", "BALCONY", "TERRACE", "COURTYARD", "COURTYARD_PARKING")
+                .contains(room.type()));
+        assertThat(drawing.versions())
+                .containsEntry("liftProvision", "NONE")
+                .containsEntry("balconyCount", "0")
+                .containsEntry("terraceRequired", "false")
+                .containsEntry("courtyardRequired", "false");
+    }
+
+    @Test
+    void singleStoreyParameterProgramDoesNotRequestVerticalCirculation() {
+        var details = details(40, 1, Facing.SOUTH);
+
+        var parameters = PlanningParameterSet.deterministic(details, null);
+
+        assertThat(parameters.variants()).allSatisfy(variant -> assertThat(variant.roomTargets())
+                .noneMatch(target -> target.roomType().equals("STAIRCASE")
+                        || target.roomType().equals("LIFT_SHAFT")));
     }
 
     @Test

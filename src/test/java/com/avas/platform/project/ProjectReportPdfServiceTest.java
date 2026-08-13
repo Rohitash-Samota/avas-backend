@@ -31,7 +31,8 @@ class ProjectReportPdfServiceTest {
                 new CostingService(new QuantityTakeoffService(), demoApprovedRates()));
         comparisons = new ProjectComparisonService(projects);
         reports = new ProjectReportPdfService(new FloorPlanPdfService(),
-                new ComparisonPdfPageRenderer(), new CostBreakdownPdfPageRenderer());
+                new RecommendationPdfPageRenderer(), new ComparisonPdfPageRenderer(),
+                new CostBreakdownPdfPageRenderer());
     }
 
     @Test
@@ -44,6 +45,10 @@ class ProjectReportPdfServiceTest {
                 .findFirst().orElseThrow();
         var preliminaryFloorRange = lakhRange(selected.estimatedCostLow(), selected.estimatedCostHigh());
         var governedFloorRange = lakhRange(option.costLow(), option.costHigh());
+        var masterBedroom = selected.geometry().rooms().stream()
+                .filter(room -> "MASTER_BEDROOM".equals(room.type())).findFirst().orElseThrow();
+        var masterDimension = String.format(Locale.ROOT, "%.1f x %.1f ft",
+                masterBedroom.width(), masterBedroom.length());
 
         assertThat(governedFloorRange).isNotEqualTo(preliminaryFloorRange);
 
@@ -56,12 +61,30 @@ class ProjectReportPdfServiceTest {
         assertThat(new String(bytes, 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         assertThat(bytes.length).isGreaterThan(10_000);
         try (var document = Loader.loadPDF(bytes)) {
-            assertThat(document.getNumberOfPages()).isGreaterThanOrEqualTo(6);
+            assertThat(document.getNumberOfPages()).isGreaterThanOrEqualTo(9);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }
             var text = new PDFTextStripper().getText(document);
             assertThat(text)
+                    .contains("PERSONALISED DESIGN RECOMMENDATION")
+                    .contains("FAMILY & AREA BASIS")
+                    .contains("5 people")
+                    .contains("4 bedrooms")
+                    .contains("3 attached + 1 common bath")
+                    .contains("LIFT + ACCESSIBILITY")
+                    .contains("AVAS: FUTURE SHAFT MINIMUM")
+                    .contains("Selected: Passenger | Drawing: 1 lift core")
+                    .contains("BALCONY + OUTDOOR")
+                    .contains("AVAS: 2 BALCONIES")
+                    .contains("Selected: 2 | Drawing: 2")
+                    .contains("Area/household rule: 1 base for a multi-floor home")
+                    .contains("ACTUAL ROOM SCHEDULE")
+                    .contains("PERSISTED VECTOR GEOMETRY - DIMENSIONS AND PLANNED CONTENTS")
+                    .contains("Master Bedroom")
+                    .contains(masterDimension)
+                    .contains("Double/queen bed, wardrobe wall and side tables")
+                    .contains("WC, basin, shower")
                     .contains("OPTION COMPARISON")
                     .contains("BEST AVAILABLE OPTION")
                     .contains("EFFICIENT COURTYARD")
@@ -81,11 +104,15 @@ class ProjectReportPdfServiceTest {
                     .contains("Kajaria")
                     .contains("DEMO-EVIDENCE-CEMENT-001")
                     .contains("Parameters: DETERMINISTIC")
-                    .contains("Prompt/schema: home-parameters-1.0.0 / home-parameters-1")
+                    .contains("Prompt/schema: home-parameters-1.1.0 / home-parameters-1")
                     .contains("Planning estimate, not a supplier quotation")
                     .contains("Brand not recorded")
                     .doesNotContain(preliminaryFloorRange)
                     .doesNotContain("Image Not Available");
+            assertThat(text.indexOf("PERSONALISED DESIGN RECOMMENDATION"))
+                    .isLessThan(text.indexOf("OPTION COMPARISON"));
+            assertThat(text.indexOf("ACTUAL ROOM SCHEDULE"))
+                    .isLessThan(text.indexOf("OPTION COMPARISON"));
             assertThat(text.replaceAll("\\s+", "")).contains("Balcony").contains("Terrace");
         }
     }

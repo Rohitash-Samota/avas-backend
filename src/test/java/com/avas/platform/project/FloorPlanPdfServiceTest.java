@@ -64,7 +64,7 @@ class FloorPlanPdfServiceTest {
                     .contains("SERVER VECTOR RENDER")
                     .contains("DETERMINISTIC parameters")
                     .contains("AVAS deterministic layout engine")
-                    .contains("avas-backend-parameter-rules-1.0.0")
+                    .contains("avas-backend-parameter-rules-1.1.0")
                     .contains("qualified architect and structural engineer before construction")
                     .doesNotContain("Image Not Available")
                     .doesNotContain("upper floors require separate layouts");

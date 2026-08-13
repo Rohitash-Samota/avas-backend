@@ -8,16 +8,19 @@ import org.springframework.stereotype.Service;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
-/** Composes comparison, authoritative floor-plan and governed costing pages into one vector report. */
+/** Composes recommendation, comparison, authoritative floor-plan and governed costing pages. */
 @Service
 public class ProjectReportPdfService {
     private final FloorPlanPdfService floorPlans;
+    private final RecommendationPdfPageRenderer recommendationPages;
     private final ComparisonPdfPageRenderer comparisonPages;
     private final CostBreakdownPdfPageRenderer costPages;
 
     public ProjectReportPdfService(FloorPlanPdfService floorPlans,
+            RecommendationPdfPageRenderer recommendationPages,
             ComparisonPdfPageRenderer comparisonPages, CostBreakdownPdfPageRenderer costPages) {
         this.floorPlans = floorPlans;
+        this.recommendationPages = recommendationPages;
         this.comparisonPages = comparisonPages;
         this.costPages = costPages;
     }
@@ -37,6 +40,7 @@ public class ProjectReportPdfService {
 
         try (var document = new PDDocument(); var output = new ByteArrayOutputStream()) {
             setMetadata(document.getDocumentInformation(), project, drawing, comparison);
+            recommendationPages.render(document, project, drawing, option);
             comparisonPages.render(document, comparison);
             // The persisted drawing keeps its early geometry-planning range. A report must instead show
             // the same governed, frozen range used by its comparison and cost pages. This copy is render-only;

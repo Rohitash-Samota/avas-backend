@@ -33,7 +33,7 @@ public record HomeParameters(
         return new HomeParameters(
                 floors == 1 ? "BUNGALOW" : floors == 2 ? "DUPLEX" : "MULTI_STOREY",
                 "DOG_LEGGED",
-                floors > 2 || seniorPresent ? "FUTURE_SHAFT" : "NONE",
+                floors > 1 && (floors > 2 || seniorPresent) ? "FUTURE_SHAFT" : "NONE",
                 floors > 1 ? 1 : 0,
                 normalized.stream().anyMatch(value -> value.contains("terrace")),
                 normalized.stream().anyMatch(value -> value.contains("courtyard") || value.contains("garden")),

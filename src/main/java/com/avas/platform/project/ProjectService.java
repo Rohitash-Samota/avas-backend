@@ -409,18 +409,23 @@ public class ProjectService {
     private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
         var d = project.details;
         var members = d.family().members();
-        // Master bedroom for the couple, one bedroom per child, and a dedicated ground-floor
-        // senior bedroom when seniors are present. A guest bedroom is a separate optional room
-        // (spec section 3, Step 4) and does not change this core headcount-driven bedroom count.
-        // Matches the specification's worked example: 2 adults + 2 children + 1 senior -> 4 bedrooms.
-        var bedrooms = Math.max(2, Math.min(6, 1 + d.family().children() + (d.family().seniorCitizens() > 0 ? 1 : 0)));
+        // Couple-sharing adult rooms, one room per child, and one senior room per two seniors.
+        // A regular guest room remains a preferred flex space rather than inflating the permanent
+        // household count. The six-room ceiling is the current low-rise geometry-engine limit.
+        var adultBedrooms = (d.family().adults() + 1) / 2;
+        var childBedrooms = d.family().children();
+        var seniorBedrooms = (d.family().seniorCitizens() + 1) / 2;
+        var bedrooms = Math.max(2, Math.min(6, adultBedrooms + childBedrooms + seniorBedrooms));
         var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
         var coverage = d.plotArea() < 1200 ? .62 : d.plotArea() < 2400 ? .58 : .54;
         var builtUp = (int) Math.round(d.plotArea() * coverage * d.floors());
         var category = d.category() == Category.NOT_SURE ? (d.budget() / Math.max(1, builtUp) >= 3000 ? "LUXURY" : d.budget() / Math.max(1, builtUp) >= 2200 ? "PREMIUM" : "STANDARD") : d.category().name();
         var rate = switch (category) { case "LUXURY" -> 3300; case "PREMIUM" -> 2600; default -> 1950; };
         var expected = (long) builtUp * rate;
-        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .9), round10(builtUp * 1.05), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.1"), accepted);
+        var guestReason = d.family().regularGuests()
+                ? "A preferred flex/guest room is included without changing the permanent bedroom count"
+                : "No separate regular-guest room was requested";
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .9), round10(builtUp * 1.05), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members require " + bedrooms + " core bedrooms", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", guestReason, category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
     }
 
     private RequirementSummary requirementFor(ProjectAggregate project) {

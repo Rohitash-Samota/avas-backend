@@ -78,12 +78,44 @@ class GeometryEngine {
             provenance.put("geometrySchemaVersion", "multi-floor-1");
             provenance.put("requestedFloors", String.valueOf(details.floors()));
             provenance.put("roadFacing", details.roadFacing().name());
+            provenance.put("householdAdults", String.valueOf(details.family().adults()));
+            provenance.put("householdChildren", String.valueOf(details.family().children()));
+            provenance.put("householdSeniors", String.valueOf(details.family().seniorCitizens()));
+            provenance.put("householdMembers", String.valueOf(details.family().members()));
+            provenance.put("regularGuests", String.valueOf(details.family().regularGuests()));
+            provenance.put("recommendedBedrooms", String.valueOf(recommendation.bedrooms()));
+            provenance.put("recommendedAttachedBathrooms",
+                    String.valueOf(recommendation.attachedBathrooms()));
+            provenance.put("recommendedCommonBathrooms", String.valueOf(recommendation.commonBathrooms()));
+            provenance.put("recommendedParkingCars", String.valueOf(recommendation.parkingCars()));
+            provenance.put("recommendedBuiltUpMinimum",
+                    String.valueOf(recommendation.builtUpAreaMinimum()));
+            provenance.put("recommendedBuiltUpMaximum",
+                    String.valueOf(recommendation.builtUpAreaMaximum()));
+            provenance.put("recommendationMethod",
+                    recommendation.provenance().getOrDefault("method", "deterministic-recommendation"));
+            provenance.put("recommendationReasons", String.join(" | ", recommendation.reasons()));
+            provenance.put("preferences", String.join(" | ", details.preferences()));
+            provenance.put("requestedLiftProvision", details.parameters().liftProvision());
+            provenance.put("requestedBalconyCount", String.valueOf(details.parameters().balconyCount()));
+            provenance.put("requestedTerrace", String.valueOf(details.parameters().terraceRequired()));
+            provenance.put("requestedCourtyard", String.valueOf(details.parameters().courtyardRequired()));
+            provenance.put("requestedAccessibleGroundFloor",
+                    String.valueOf(details.parameters().accessibleGroundFloor()));
+            provenance.put("requestedParkingCars", String.valueOf(details.parameters().parkingCars()));
+            provenance.put("requestedSolarReady", String.valueOf(details.parameters().solarReady()));
+            provenance.put("requestedRainwaterHarvesting",
+                    String.valueOf(details.parameters().rainwaterHarvesting()));
+            provenance.put("requestedHomeType", details.parameters().homeType());
+            provenance.put("requestedStaircaseType", details.parameters().staircaseType());
+            provenance.put("finishTier", details.category().name());
+            provenance.put("projectCity", details.city());
             provenance.put("optimizerSeed", Integer.toUnsignedString(
                     Objects.hash(projectId, version, strategy.key())));
             if (parameterSet != null) {
                 provenance.put("parameterProvider", safe(parameterSet.provider(), "DETERMINISTIC"));
-                provenance.put("parameterModel", safe(parameterSet.model(), "avas-parameter-rules-1.0.0"));
-                provenance.put("promptVersion", safe(parameterSet.promptVersion(), "home-parameters-1.0.0"));
+                provenance.put("parameterModel", safe(parameterSet.model(), "avas-parameter-rules-1.1.0"));
+                provenance.put("promptVersion", safe(parameterSet.promptVersion(), "home-parameters-1.1.0"));
                 provenance.put("parameterSchemaVersion", safe(parameterSet.schemaVersion(), "home-parameters-1"));
                 provenance.put("parameterFallback", String.valueOf(parameterSet.fallbackUsed()));
                 if (parameterSet.requestId() != null) provenance.put("parameterRequestId", parameterSet.requestId());
@@ -280,16 +312,9 @@ class GeometryEngine {
 
     private HomeParameters optionParameters(HomeParameters requested, PlanningParameterVariant variant) {
         if (variant == null) return requested;
-        // Explicit circulation choices remain hard bounds. A generated option may add optional
-        // lifestyle/future-ready provisions, but it cannot remove anything the customer requested.
-        return new HomeParameters(requested.homeType(), requested.staircaseType(), requested.liftProvision(),
-                Math.max(requested.balconyCount(), variant.balconyCount()),
-                requested.terraceRequired() || variant.terraceRequired(),
-                requested.courtyardRequired() || variant.courtyardRequired(),
-                requested.accessibleGroundFloor() || variant.accessibleGroundFloor(),
-                Math.max(requested.parkingCars(), variant.parkingCars()),
-                requested.solarReady() || variant.solarReady(),
-                requested.rainwaterHarvesting() || variant.rainwaterHarvesting());
+        // These fields are explicit customer selections. Parameter variants may recommend room
+        // sizes and priorities, but must never silently add a balcony, terrace, courtyard or lift.
+        return requested;
     }
 
     private String safe(String value, String fallback) {
@@ -350,6 +375,11 @@ class GeometryEngine {
 
     private void validateStairCores(LinkedHashSet<String> expectedFloors, List<RoomGeometry> rooms,
             List<String> violations) {
+        if (expectedFloors.size() == 1) {
+            var stairs = rooms.stream().filter(room -> "STAIRCASE".equals(room.type())).count();
+            if (stairs > 0) violations.add("A single-storey home must not contain an internal stair core");
+            return;
+        }
         RoomGeometry reference = null;
         for (var floor : expectedFloors) {
             var stairs = rooms.stream()
@@ -685,7 +715,7 @@ class GeometryEngine {
         if (floorIndex == 0) {
             return packGroundFloor(startX, startY, baseLeftWidth, baseRightWidth,
                     baseTopLength, baseBottomLength,
-                    bedroomCount, seniorBedroomRequired, liftRequired, parameters, variant);
+                    bedroomCount, seniorBedroomRequired, floorCount > 1, liftRequired, parameters, variant);
         }
         var columnAdjustment = floorIndex == 1 ? .04 : -.03;
         var rowAdjustment = floorIndex == 1 ? -.03 : .03;
@@ -722,7 +752,7 @@ class GeometryEngine {
 
     private List<RoomGeometry> packGroundFloor(double startX, double startY, double leftWidth,
             double rightWidth, double topLength, double bottomLength, int bedroomCount,
-            boolean seniorBedroomRequired, boolean liftRequired, HomeParameters parameters,
+            boolean seniorBedroomRequired, boolean stairRequired, boolean liftRequired, HomeParameters parameters,
             PlanningParameterVariant variant) {
         var rooms = new ArrayList<RoomGeometry>();
         var roomIndex = 1;
@@ -770,10 +800,16 @@ class GeometryEngine {
                 startY + topLength, rightWidth * .52, bottomLength * .58));
         rooms.add(room(0, roomIndex++, "KITCHEN", rightX + rightWidth * .52,
                 startY + topLength, rightWidth * .48, bottomLength * .58));
-        addVerticalCore(rooms, 0, roomIndex, rightX,
-                startY + topLength + bottomLength * .58, rightWidth * .38, bottomLength * .42,
-                liftRequired);
-        roomIndex += liftRequired ? 2 : 1;
+        var coreX = rightX;
+        var coreY = startY + topLength + bottomLength * .58;
+        var coreWidth = rightWidth * .38;
+        var coreLength = bottomLength * .42;
+        if (stairRequired) {
+            addVerticalCore(rooms, 0, roomIndex, coreX, coreY, coreWidth, coreLength, liftRequired);
+            roomIndex += liftRequired ? 2 : 1;
+        } else {
+            rooms.add(room(0, roomIndex++, "STORE", coreX, coreY, coreWidth, coreLength));
+        }
         rooms.add(room(0, roomIndex++, "BATHROOM", rightX + rightWidth * .38,
                 startY + topLength + bottomLength * .58, rightWidth * .24, bottomLength * .42));
         rooms.add(room(0, roomIndex, bedroomCount >= 4 ? "BEDROOM" : "UTILITY",
@@ -821,8 +857,8 @@ class GeometryEngine {
     private List<String> roomProgram(int floorIndex, int bedroomCount) {
         var program = new ArrayList<>(switch (floorIndex) {
             case 1 -> List.of("FLEX_ROOM", "FAMILY_LOUNGE", "DRESSING_ROOM", "STUDY", "ATTACHED_BATHROOM",
-                    "STAIRCASE", "BATHROOM", "BALCONY");
-            default -> List.of("FLEX_ROOM", "MULTIPURPOSE_ROOM", "TERRACE", "HOME_OFFICE", "PRAYER_ROOM",
+                    "STAIRCASE", "BATHROOM", "LAUNDRY");
+            default -> List.of("FLEX_ROOM", "MULTIPURPOSE_ROOM", "STORE", "HOME_OFFICE", "PRAYER_ROOM",
                     "STAIRCASE", "BATHROOM", "LAUNDRY");
         });
         var bedroomSlots = List.of(0, 2, 3, 4);
