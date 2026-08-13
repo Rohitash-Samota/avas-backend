@@ -38,6 +38,6 @@ No shared accounts or passwords are included. For a new database only, set `AVAS
 
 ## Security model
 
-Every protected request is authenticated and reduced to the selected `X-Active-Role`. The selected role must be active, assigned to the account and hold the required permission. Project access is owner-scoped unless the active role is Administrator; professional and site access requires an explicit assignment source.
+Every protected request is authenticated and reduced to the selected `X-Active-Role`. The selected role must be active, assigned to the account and hold the required permission. The `INDIVIDUAL` role is a protected system baseline: it cannot be disabled or stripped of customer-journey permissions. Project access is owner-scoped unless the active role is Administrator; professional and site access requires an explicit assignment source.
 
 See `docs/api.md` for endpoints and `docs/architecture.md` for data ownership.

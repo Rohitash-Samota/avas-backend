@@ -36,7 +36,10 @@ public record PriceSubmissionResponse(
         String reviewNote,
         String decisionNote,
         Instant createdAt,
-        Instant submittedAt
+        Instant submittedAt,
+        String brandName,
+        String productCode,
+        String specification
 ) {
     static PriceSubmissionResponse from(PriceSubmissionEntity value) {
         return new PriceSubmissionResponse(
@@ -70,6 +73,9 @@ public record PriceSubmissionResponse(
                 value.reviewNote(),
                 value.reviewNote(),
                 value.createdAt(),
-                value.createdAt());
+                value.createdAt(),
+                value.brandName(),
+                value.productCode(),
+                value.specification());
     }
 }

@@ -19,7 +19,7 @@ import java.util.List;
 import java.util.UUID;
 
 @Service
-public class PricingService {
+public class PricingService implements CostRateProvider {
     private static final Logger log = LoggerFactory.getLogger(PricingService.class);
     private static final BigDecimal ONE_HUNDRED = new BigDecimal("100");
 
@@ -98,7 +98,8 @@ public class PricingService {
         var evidence = submissions.findByStatusOrderByCreatedAtDesc(PriceSubmissionStatus.APPROVED).stream()
                 .filter(value -> value.itemType() == PriceItemType.COST_PER_SQFT)
                 .filter(value -> value.qualityTier() == request.category())
-                .filter(value -> value.city().equalsIgnoreCase(request.city().trim()))
+                .filter(value -> CostRateProvider.canonicalCity(value.city()).equalsIgnoreCase(
+                        CostRateProvider.canonicalCity(request.city())))
                 .filter(value -> value.currentlyEffective(today, configuration.priceFreshnessDays()))
                 .sorted(Comparator.comparing(PriceSubmissionEntity::unitPrice))
                 .toList();
@@ -138,6 +139,57 @@ public class PricingService {
                 "Created explainable budget recommendation using " + source);
         writeRecommendation(value);
         return BudgetRecommendationResponse.from(value);
+    }
+
+    /**
+     * Resolves a complete read-only pricing snapshot for project costing. Approved evidence is
+     * selected deterministically as of the supplied date; mutable repositories are never exposed to
+     * the project module.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public CostRateSnapshot resolve(CostRateQuery query) {
+        var configuration = configuration();
+        var city = CostRateProvider.canonicalCity(query.city());
+        var approved = submissions.findByStatusOrderByCreatedAtDesc(PriceSubmissionStatus.APPROVED).stream()
+                .filter(value -> value.qualityTier() == query.qualityTier())
+                .filter(value -> CostRateProvider.canonicalCity(value.city()).equalsIgnoreCase(city))
+                .filter(value -> value.currentlyEffective(query.asOf(), configuration.priceFreshnessDays()))
+                .toList();
+
+        var baseEvidence = approved.stream()
+                .filter(value -> value.itemType() == PriceItemType.COST_PER_SQFT)
+                .sorted(Comparator.comparing(PriceSubmissionEntity::unitPrice))
+                .toList();
+        var baseRate = baseEvidence.isEmpty() ? configuration.rate(query.qualityTier()) : median(baseEvidence);
+        var baseSource = baseEvidence.isEmpty() ? "AVAS_ADMIN_BASE_PRICE" : "APPROVED_LOCAL_EVIDENCE";
+        var resolved = new ArrayList<CostRateEvidence>();
+        for (var requirement : query.requirements()) {
+            var matches = approved.stream()
+                    .filter(value -> value.itemType() == requirement.itemType())
+                    .filter(value -> canonicalKey(value.category()).equals(canonicalKey(requirement.category())))
+                    .filter(value -> canonicalKey(value.unit()).equals(canonicalKey(requirement.unit())))
+                    .sorted(Comparator.comparing(PriceSubmissionEntity::unitPrice))
+                    .toList();
+            if (matches.isEmpty()) continue;
+            // Freeze one real observation so the evidence ID, brand/product and rate always refer
+            // to the same approved record. Sample count still communicates the supporting pool.
+            var representative = matches.get((matches.size() - 1) / 2);
+            resolved.add(new CostRateEvidence(requirement.code(), representative.id().toString(),
+                    representative.itemName(), representative.itemType(), representative.category(),
+                    representative.qualityTier(), CostRateProvider.canonicalCity(representative.city()),
+                    representative.state(), representative.unit(), representative.unitPrice(), representative.productCode(),
+                    representative.brandName(), representative.specification(), representative.supplierName(),
+                    representative.source(), representative.observedOn(), representative.effectiveFrom(),
+                    representative.expiresOn(), representative.taxPercentage(), representative.materialIncluded(),
+                    representative.labourIncluded(), representative.transportIncluded(), matches.size(),
+                    confidence(matches.size(), configuration.minConfidenceSources())));
+        }
+        var representativeBase = baseEvidence.isEmpty() ? null : baseEvidence.get(baseEvidence.size() / 2);
+        return new CostRateSnapshot(configuration.defaultCurrency(), city, query.qualityTier(), query.asOf(), baseRate,
+                baseSource, representativeBase == null ? null : representativeBase.id().toString(),
+                baseEvidence.size(), configuration.contingencyPercent(), configuration.recommendationValidityDays(),
+                configuration.configurationVersion(), resolved);
     }
 
     @Transactional
@@ -251,6 +303,11 @@ public class PricingService {
         if (values.size() % 2 == 1) return values.get(middle).unitPrice();
         return values.get(middle - 1).unitPrice().add(values.get(middle).unitPrice())
                 .divide(new BigDecimal("2"), 2, RoundingMode.HALF_UP);
+    }
+
+    private static String canonicalKey(String value) {
+        return value == null ? "" : value.trim().toUpperCase(java.util.Locale.ROOT)
+                .replaceAll("[^A-Z0-9]+", "_").replaceAll("(^_|_$)", "");
     }
 
     private static ConfidenceLevel confidence(int count, int target) {

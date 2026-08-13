@@ -71,6 +71,15 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
     @Column(length = 160)
     private String supplierName;
 
+    @Column(length = 120)
+    private String brandName;
+
+    @Column(length = 100)
+    private String productCode;
+
+    @Column(length = 1000)
+    private String specification;
+
     @Column(length = 160)
     private String source;
 
@@ -126,6 +135,9 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
         effectiveFrom = request.effectiveFrom() == null ? observedOn : request.effectiveFrom();
         expiresOn = request.expiresOn();
         supplierName = clean(request.supplierName());
+        brandName = clean(request.brandName());
+        productCode = clean(request.productCode());
+        specification = clean(request.specification());
         source = clean(request.source());
         notes = clean(request.notes());
         taxPercentage = request.taxPercentage() == null ? BigDecimal.ZERO : request.taxPercentage();
@@ -237,6 +249,18 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
 
     String supplierName() {
         return supplierName;
+    }
+
+    String brandName() {
+        return brandName;
+    }
+
+    String productCode() {
+        return productCode;
+    }
+
+    String specification() {
+        return specification;
     }
 
     String source() {

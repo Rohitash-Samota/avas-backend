@@ -2,6 +2,7 @@ package com.avas.platform.project;
 
 import com.avas.platform.project.persistence.ProjectPersistenceService;
 import com.avas.platform.auth.AvasPrincipal;
+import com.avas.platform.pricing.PriceCategory;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,7 +11,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +25,8 @@ public class ProjectService {
     private final GeometryEngine geometryEngine;
     private final Map<String, String> versions;
     private final ProjectPersistenceService persistence;
+    private final CostingService costing;
+    private final PlanningParameterClient planningParameters;
 
     @Autowired
     public ProjectService(
@@ -33,17 +35,43 @@ public class ProjectService {
             @Value("${avas.versions.knowledge}") String knowledge,
             @Value("${avas.versions.strategy}") String strategy,
             @Value("${avas.versions.estimate-policy}") String estimatePolicy,
-            ProjectPersistenceService persistence
+            ProjectPersistenceService persistence,
+            CostingService costing,
+            PlanningParameterClient planningParameters
     ) {
         this.geometryEngine = geometryEngine;
         this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge, "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
         this.persistence = persistence;
+        this.costing = costing;
+        this.planningParameters = planningParameters;
     }
 
     public ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy, String estimatePolicy) {
         this.geometryEngine = geometryEngine;
         this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge, "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
         this.persistence = null;
+        this.costing = CostingService.administrativeDefaults();
+        this.planningParameters = deterministicPlanningParameters();
+    }
+
+    ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy,
+            String estimatePolicy, CostingService costing) {
+        this.geometryEngine = geometryEngine;
+        this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge,
+                "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
+        this.persistence = null;
+        this.costing = costing;
+        this.planningParameters = deterministicPlanningParameters();
+    }
+
+    ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy,
+            String estimatePolicy, CostingService costing, PlanningParameterClient planningParameters) {
+        this.geometryEngine = geometryEngine;
+        this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge,
+                "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
+        this.persistence = null;
+        this.costing = costing;
+        this.planningParameters = planningParameters;
     }
 
     @PostConstruct
@@ -143,7 +171,8 @@ public class ProjectService {
     public synchronized ProjectSummary updatePreferences(String projectId, PreferenceRequest request, String role) {
         var project = requiredWithDetails(projectId);
         var d = project.details;
-        project.details = new BasicDetailsRequest(d.plotWidth(), d.plotLength(), d.roadFacing(), d.city(), d.floors(), d.budget(), d.category(), d.family(), request.preferences());
+        project.details = new BasicDetailsRequest(d.plotWidth(), d.plotLength(), d.roadFacing(), d.city(), d.floors(),
+                d.budget(), d.category(), d.family(), request.preferences(), d.parameters());
         project.snapshotVersion++;
         project.recommendation = recommendationFor(project, false);
         project.requirementSummary = null;
@@ -159,22 +188,63 @@ public class ProjectService {
         return summary;
     }
 
-    public synchronized DrawingJob generateDrawings(String projectId, String role) {
+    public DrawingJob generateDrawings(String projectId, String role) {
+        final String snapshotId;
+        final BasicDetailsRequest frozenDetails;
+        final Recommendation frozenRecommendation;
+        final String tenantId;
+        synchronized (this) {
+            var project = required(projectId);
+            if (project.requirementSummary == null) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Approve the requirement summary before generating drawings");
+            }
+            snapshotId = project.requirementSummary.snapshotId();
+            frozenDetails = project.details;
+            frozenRecommendation = project.recommendation;
+            tenantId = access.getOrDefault(project.id,
+                    new ProjectPersistenceService.ProjectAccess(project.id, "tenant-public", null)).tenantId();
+        }
+        // Network I/O must not hold the singleton ProjectService monitor: one slow provider must
+        // never block unrelated project mutations. The frozen snapshot is rechecked before commit.
+        var parameters = planningParameters.optimize(tenantId, projectId, snapshotId, frozenDetails);
+        synchronized (this) {
         var project = required(projectId);
-        if (project.requirementSummary == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "Approve the requirement summary before generating drawings");
+        if (project.requirementSummary == null
+                || !snapshotId.equals(project.requirementSummary.snapshotId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Project requirements changed while planning parameters were generated; retry");
+        }
         var jobId = "job-" + UUID.randomUUID();
-        var started = new DrawingJob(jobId, projectId, JobStatus.GENERATING_LAYOUTS, 45, "Generating layout strategies", List.of(), project.requirementSummary.snapshotId(), Instant.now(), null);
-        project.jobs.add(started);
+        var started = new DrawingJob(jobId, projectId, JobStatus.GENERATING_LAYOUTS, 45, "Generating layout strategies", List.of(), snapshotId, Instant.now(), null);
         var nextVersion = project.drawings.stream().mapToInt(DrawingCandidate::version).max().orElse(0) + 1;
-        var generated = geometryEngine.generate(projectId, nextVersion, project.details, project.recommendation, versions);
+        var generated = geometryEngine.generate(projectId, nextVersion, frozenDetails,
+                frozenRecommendation, versions, parameters);
+        var generatedEstimates = new ArrayList<Estimate>();
+        for (var drawing : generated) {
+            generatedEstimates.add(estimateFor(project, drawing, project.estimates.size()
+                    + generatedEstimates.size() + 1));
+        }
+        // Commit the fully staged generation atomically only after geometry and all three governed
+        // estimates succeed. A retry can never observe or version from partial artifacts.
         project.drawings.addAll(generated);
+        project.estimates.addAll(generatedEstimates);
         project.status = generated.stream().anyMatch(d -> "EXPERT_REVIEW".equals(d.status())) ? "REVIEW_REQUIRED" : "CONCEPTS_READY";
         project.updatedAt = Instant.now();
-        var completed = new DrawingJob(jobId, projectId, JobStatus.COMPLETED, 100, "Rendered and validated", generated.stream().map(DrawingCandidate::id).toList(), project.requirementSummary.snapshotId(), started.createdAt(), Instant.now());
-        project.jobs.set(project.jobs.size() - 1, completed);
-        audit(project, "LAYOUT_CANDIDATES_GENERATED", role, jobId, String.valueOf(project.snapshotVersion), "Three candidate strategies generated");
+        var completed = new DrawingJob(jobId, projectId, JobStatus.COMPLETED, 100, "Rendered and validated", generated.stream().map(DrawingCandidate::id).toList(), snapshotId, started.createdAt(), Instant.now());
+        project.jobs.add(completed);
+        for (var index = 0; index < generated.size(); index++) {
+            var drawing = generated.get(index);
+            var estimate = generatedEstimates.get(index);
+            audit(project, "ESTIMATE_AUTO_GENERATED", role, estimate.id(), String.valueOf(estimate.version()),
+                    "Frozen governed cost snapshot for " + drawing.strategy());
+        }
+        audit(project, "LAYOUT_CANDIDATES_GENERATED", role, jobId, String.valueOf(project.snapshotVersion),
+                "Three validated candidate strategies generated from " + parameters.provider()
+                        + " parameter set" + (parameters.fallbackUsed() ? " (fallback)" : ""));
         persist(project);
         return completed;
+        }
     }
 
     public DrawingJob drawingJob(String projectId, String jobId) {
@@ -262,6 +332,9 @@ public class ProjectService {
         var project = required(projectId);
         var drawing = drawing(drawingId);
         if (!drawing.projectId().equals(projectId)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Drawing does not belong to this project");
+        var existing = project.estimates.stream().filter(value -> value.drawingId().equals(drawingId))
+                .max(java.util.Comparator.comparingInt(Estimate::version));
+        if (existing.isPresent()) return existing.get();
         var estimate = estimateFor(project, drawing);
         project.estimates.add(estimate);
         project.updatedAt = Instant.now();
@@ -277,7 +350,7 @@ public class ProjectService {
     public synchronized Estimate approveEstimate(String estimateId, String role) {
         var found = findEstimate(estimateId);
         var e = found.estimate;
-        var approved = new Estimate(e.id(), e.projectId(), e.drawingId(), e.version(), e.low(), e.recommended(), e.high(), e.builtUpArea(), e.durationMonthsLow(), e.durationMonthsHigh(), e.confidence(), e.validUntil(), e.items(), e.assumptions(), e.exclusions(), e.versions(), true, e.createdAt());
+        var approved = e.withApproved(true);
         found.project.estimates.set(found.index, approved);
         audit(found.project, "PLANNING_ESTIMATE_APPROVED", role, e.id(), String.valueOf(e.version()), "Estimate accepted as a planning range, not a fixed commitment");
         persist(found.project);
@@ -347,7 +420,7 @@ public class ProjectService {
         var category = d.category() == Category.NOT_SURE ? (d.budget() / Math.max(1, builtUp) >= 3000 ? "LUXURY" : d.budget() / Math.max(1, builtUp) >= 2200 ? "PREMIUM" : "STANDARD") : d.category().name();
         var rate = switch (category) { case "LUXURY" -> 3300; case "PREMIUM" -> 2600; default -> 1950; };
         var expected = (long) builtUp * rate;
-        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.plotArea() >= 1800 ? 2 : 1, round10(builtUp * .9), round10(builtUp * 1.05), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.1"), accepted);
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .9), round10(builtUp * 1.05), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.1"), accepted);
     }
 
     private RequirementSummary requirementFor(ProjectAggregate project) {
@@ -356,17 +429,15 @@ public class ProjectService {
     }
 
     private Estimate estimateFor(ProjectAggregate project, DrawingCandidate drawing) {
-        var recommended = Math.round((drawing.estimatedCostLow() + drawing.estimatedCostHigh()) / 2.0);
-        var shares = new double[]{.36, .15, .08, .07, .115, .09, .045};
-        var categories = new String[]{"Civil structure", "Flooring & finishes", "Electrical", "Plumbing", "Kitchen & bathrooms", "Doors & windows", "Professional services"};
-        var descriptions = new String[]{"RCC, steel, blockwork and plaster", "Premium flooring and paint", "Concealed wiring and standard fixtures", "Water supply, drainage and fixtures", "Modular kitchen and bathroom package", "Engineered wood and aluminium", "Architect review and site engineering"};
-        var items = new ArrayList<EstimateItem>();
-        for (int i = 0; i < shares.length; i++) {
-            var amount = roundThousand(recommended * shares[i]);
-            items.add(new EstimateItem("BOQ-" + String.format("%03d", i + 1), categories[i], descriptions[i], "LS", 1, amount, amount, "JPR-PRICE-2026-07-30-" + (i + 1), 86 + i));
-        }
-        var version = project.estimates.size() + 1;
-        return new Estimate("estimate-" + project.id + "-v" + version, project.id, drawing.id(), version, drawing.estimatedCostLow(), recommended, drawing.estimatedCostHigh(), drawing.builtUpArea(), 11, 13, 89, LocalDate.now().plusDays(30), items, List.of("Standard soil and foundation conditions", "Rates cover Jaipur supplier markets within 28 km", "7% contingency is included in the upper planning range"), List.of("Land cost", "Authority fees not yet verified", "Loose furniture and appliances"), versions, false, Instant.now());
+        return estimateFor(project, drawing, project.estimates.size() + 1);
+    }
+
+    private Estimate estimateFor(ProjectAggregate project, DrawingCandidate drawing, int version) {
+        var tier = PriceCategory.valueOf(project.recommendation.category());
+        var tenantId = access.getOrDefault(project.id,
+                new ProjectPersistenceService.ProjectAccess(project.id, "tenant-public", null)).tenantId();
+        return costing.cost("estimate-" + project.id + "-v" + version, version, tenantId, project.summary(), drawing,
+                tier, versions);
     }
 
     private String interpretFeedback(String feedback) {
@@ -412,5 +483,9 @@ public class ProjectService {
     }
     private int round10(double value) { return (int) Math.round(value / 10.0) * 10; }
     private long roundLakh(double value) { return Math.round(value / 100_000.0) * 100_000; }
-    private long roundThousand(double value) { return Math.round(value / 1_000.0) * 1_000; }
+
+    private static PlanningParameterClient deterministicPlanningParameters() {
+        return (tenantId, projectId, contextVersion, details) ->
+                PlanningParameterSet.deterministic(details, null);
+    }
 }

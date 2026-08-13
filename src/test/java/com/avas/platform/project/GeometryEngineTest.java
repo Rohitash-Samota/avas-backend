@@ -25,9 +25,13 @@ class GeometryEngineTest {
                 assertThat(candidate.hardViolations())
                         .contains("Programme gap: " + (floors == 1 ? 0 : 1)
                                 + " of 3 recommended attached bathrooms represented");
-                assertThat(candidate.hardViolations())
-                        .contains("Programme gap: placed built-up area " + candidate.builtUpArea()
-                                + " sq ft is outside recommended 2400-2800 sq ft cost basis");
+                var areaGap = "Programme gap: placed built-up area " + candidate.builtUpArea()
+                        + " sq ft is outside recommended 2400-2800 sq ft cost basis";
+                if (candidate.builtUpArea() < 2400 * .98 || candidate.builtUpArea() > 2800 * 1.02) {
+                    assertThat(candidate.hardViolations()).contains(areaGap);
+                } else {
+                    assertThat(candidate.hardViolations()).doesNotContain(areaGap);
+                }
                 if (floors == 1) {
                     assertThat(candidate.hardViolations())
                             .contains("Programme gap: recommended family lounge is not represented")
@@ -77,7 +81,10 @@ class GeometryEngineTest {
             });
 
             assertThat(candidates).allSatisfy(candidate -> assertThat(candidate.builtUpArea()).isEqualTo(
-                    (int) Math.round(candidate.geometry().rooms().stream().mapToDouble(RoomGeometry::area).sum())));
+                    (int) Math.round(candidate.geometry().rooms().stream()
+                            .filter(room -> !List.of("PARKING", "COURTYARD_PARKING", "COURTYARD",
+                                    "OPEN_SPACE", "TERRACE").contains(room.type()))
+                            .mapToDouble(RoomGeometry::area).sum())));
             var balanced = candidates.get(1);
             if (floors > 1) {
                 assertThat(widthOf(balanced, "GROUND", 1)).isNotEqualTo(widthOf(balanced, "FIRST", 1));
@@ -188,6 +195,64 @@ class GeometryEngineTest {
                 .toList();
         assertThat(engine.validateDocument(3, moved, geometry.doors(), geometry.windows()))
                 .anyMatch(value -> value.contains("Stair cores are not vertically aligned"));
+    }
+
+    @Test
+    void persistsTypedAiParameterProvenanceAndAlignsRequestedLiftShaft() {
+        var base = details(40, 2, Facing.NORTH);
+        var details = new BasicDetailsRequest(base.plotWidth(), base.plotLength(), base.roadFacing(),
+                base.city(), base.floors(), base.budget(), base.category(), base.family(),
+                base.preferences(), new HomeParameters("DUPLEX", "U_SHAPED", "PASSENGER", 2,
+                        true, true, true, 2, true, true));
+        var parameters = PlanningParameterSet.deterministic(details, null);
+
+        var drawing = engine.generate("project-parameters", 1, details, recommendation(), versions(),
+                parameters).get(1);
+
+        assertThat(drawing.geometry().rooms()).filteredOn(room -> room.type().equals("LIFT_SHAFT"))
+                .hasSize(2).extracting(RoomGeometry::floor).containsExactly("GROUND", "FIRST");
+        assertThat(drawing.geometry().rooms()).filteredOn(room -> room.type().equals("BALCONY"))
+                .hasSize(2);
+        assertThat(drawing.geometry().rooms()).extracting(RoomGeometry::type)
+                .contains("TERRACE", "COURTYARD_PARKING");
+        assertThat(engine.validateDocument(2, drawing.geometry().rooms(), drawing.geometry().doors(),
+                drawing.geometry().windows())).isEmpty();
+        assertThat(drawing.versions())
+                .containsEntry("parameterProvider", "DETERMINISTIC")
+                .containsEntry("staircaseType", "U_SHAPED")
+                .containsEntry("liftProvision", "PASSENGER")
+                .containsEntry("parameterSchemaVersion", "home-parameters-1");
+    }
+
+    @Test
+    void recordsLiveOpenAiParameterProvenanceWithoutClaimingAiGeneratedGeometry() {
+        var details = details(40, 2, Facing.NORTH);
+        var deterministic = PlanningParameterSet.deterministic(details, null);
+        var openAi = new PlanningParameterSet("openai-request-1", "OPENAI", "gpt-5.4-mini",
+                "home-parameters-1.0.0", "home-parameters-1", false, List.of(),
+                deterministic.variants());
+
+        var drawing = engine.generate("project-openai-parameters", 1, details, recommendation(), versions(),
+                openAi).getFirst();
+
+        assertThat(drawing.versions())
+                .containsEntry("parameterProvider", "OPENAI")
+                .containsEntry("parameterRequestId", "openai-request-1")
+                .containsEntry("generationModel", "gpt-5.4-mini")
+                .containsEntry("generationMode", "AI_PARAMETER_ASSISTED_DETERMINISTIC_GEOMETRY")
+                .containsEntry("generator", "AVAS deterministic layout engine");
+    }
+
+    @Test
+    void derivesParkingCapacityFromUsableDimensionsNotAreaAlone() {
+        var normal = engine.generate("parking-normal", 1, details(40, 2), recommendation(), versions())
+                .get(1);
+        assertThat(normal.hardViolations()).noneMatch(value -> value.contains("parking bays represented"));
+
+        var narrowDetails = new BasicDetailsRequest(10, 180, Facing.NORTH, "Jaipur", 2, 7_000_000,
+                Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
+        var narrow = engine.generate("parking-narrow", 1, narrowDetails, recommendation(), versions()).get(1);
+        assertThat(narrow.hardViolations()).anyMatch(value -> value.contains("parking bays represented"));
     }
 
     private RoomGeometry withType(RoomGeometry room, String type) {

@@ -6,8 +6,9 @@ import java.util.Map;
 import java.util.Set;
 
 final class IdentityDefaults {
-    static final int ROLE_DEFINITION_VERSION = 5;
+    static final int ROLE_DEFINITION_VERSION = 6;
     static final Map<String, Set<String>> ROLE_DEFINITIONS = roleDefinitions();
+    static final Set<String> REQUIRED_INDIVIDUAL_PERMISSIONS = ROLE_DEFINITIONS.get("INDIVIDUAL");
     static final Set<String> PERMISSION_CATALOG = ROLE_DEFINITIONS.values().stream()
             .flatMap(Set::stream).collect(java.util.stream.Collectors.toUnmodifiableSet());
 

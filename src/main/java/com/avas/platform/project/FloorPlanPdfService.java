@@ -261,14 +261,24 @@ public class FloorPlanPdfService {
             float roomX, float roomY, float roomWidth, float roomHeight) throws IOException {
         if (roomWidth < 18 || roomHeight < 18) return;
         var label = titleCase(room.type());
+        if (roomWidth < 28 && roomHeight >= 36) {
+            var verticalSize = Math.min(5f, Math.max(3.8f, roomWidth * .2f));
+            label = fitWidth(label, BOLD, verticalSize, roomHeight - 10);
+            textRotated(canvas, BOLD, verticalSize, INK, label,
+                    roomX + roomWidth / 2, roomY + roomHeight / 2, 90);
+            return;
+        }
         var fontSize = Math.min(7.4f, roomHeight * .12f);
-        while (fontSize > 5.2f && textWidth(BOLD, fontSize, label) > roomWidth - 8) fontSize -= .2f;
-        if (textWidth(BOLD, fontSize, label) > roomWidth - 6) label = compactRoomLabel(room.type());
+        var availableWidth = Math.max(8, roomWidth - 8);
+        while (fontSize > 4.2f && textWidth(BOLD, fontSize, label) > availableWidth) fontSize -= .2f;
+        if (textWidth(BOLD, fontSize, label) > availableWidth) label = compactRoomLabel(room.type());
+        while (fontSize > 3.4f && textWidth(BOLD, fontSize, label) > availableWidth) fontSize -= .2f;
+        label = fitWidth(label, BOLD, fontSize, availableWidth);
 
         var labelY = roomY + roomHeight * .39f;
         textCentered(canvas, BOLD, fontSize, INK, label, roomX + roomWidth / 2, labelY);
         var dimensions = oneDecimal(room.width()) + " ft x " + oneDecimal(room.length()) + " ft";
-        var dimensionSize = Math.max(4.6f, fontSize - 1.7f);
+        var dimensionSize = Math.max(3.4f, fontSize - 1.2f);
         if (roomHeight >= 34 && textWidth(REGULAR, dimensionSize, dimensions) <= roomWidth - 6) {
             textCentered(canvas, REGULAR, dimensionSize, MUTED, dimensions,
                     roomX + roomWidth / 2, labelY - Math.max(7, fontSize + 1));
@@ -287,6 +297,9 @@ public class FloorPlanPdfService {
             case "HOME_OFFICE" -> "Office";
             case "PRAYER_ROOM" -> "Prayer";
             case "STAIRCASE" -> "Stairs";
+            case "LIFT_SHAFT" -> "Lift";
+            case "COURTYARD_PARKING" -> "Court / Park";
+            case "OPEN_SPACE" -> "Open Space";
             case "BATHROOM" -> "Bath";
             default -> fitCharacters(titleCase(type), 9);
         };
@@ -361,6 +374,13 @@ public class FloorPlanPdfService {
                 line(canvas, FIXTURE, .45f, left, y, right, y);
             }
             line(canvas, FIXTURE, .7f, centerX, start, centerX, Math.min(roomY + roomHeight - 5, start + step * 5));
+        } else if (type.contains("LIFT")) {
+            var size = Math.min(18, Math.min(roomWidth, roomHeight) * .42f);
+            var x = centerX - size / 2;
+            var y = fixtureY;
+            stroke(canvas, FIXTURE, .65f, x, y, size, size);
+            line(canvas, FIXTURE, .45f, x + 3, y + 3, x + size - 3, y + size - 3);
+            line(canvas, FIXTURE, .45f, x + size - 3, y + 3, x + 3, y + size - 3);
         } else if (type.contains("BATH") || type.contains("TOILET")) {
             var radius = Math.min(7, Math.min(roomWidth, roomHeight) * .15f);
             circle(canvas, FIXTURE, .5f, centerX, fixtureY + radius, radius);
@@ -584,9 +604,10 @@ public class FloorPlanPdfService {
         fill(canvas, PAPER, x + 1, y + 1, width - 2, provenanceHeight - 1);
         text(canvas, BOLD, 4.8f, CORAL, "SERVER VECTOR RENDER", x + 9, y + 7);
         var versions = versions(drawing);
-        var provenance = versions.getOrDefault("generationModel", "Not recorded") + " | "
-                + versions.getOrDefault("generator", "Not recorded") + " | "
-                + versions.getOrDefault("strategyVersion", "Not recorded");
+        var provenance = versions.getOrDefault("parameterProvider", "DETERMINISTIC") + " parameters"
+                + " | " + versions.getOrDefault("parameterModel", "avas-parameter-rules")
+                + " | fallback " + versions.getOrDefault("parameterFallback", "false")
+                + " | " + versions.getOrDefault("generator", "Not recorded");
         text(canvas, REGULAR, 4.8f, MUTED, provenance, x + 78, y + 7);
     }
 
@@ -657,7 +678,9 @@ public class FloorPlanPdfService {
         var versions = versions(drawing);
         var cursor = y + height - 31;
         cursor = keyValue(canvas, "Generator", versions.getOrDefault("generator", "Not recorded"), x + 10, cursor, width - 20);
-        cursor = keyValue(canvas, "Generation model", versions.getOrDefault("generationModel", "Not recorded"), x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Parameter provider", versions.getOrDefault("parameterProvider", "DETERMINISTIC"), x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Parameter model", versions.getOrDefault("parameterModel", "avas-parameter-rules"), x + 10, cursor, width - 20);
+        cursor = keyValue(canvas, "Parameter fallback", versions.getOrDefault("parameterFallback", "false"), x + 10, cursor, width - 20);
         cursor = keyValue(canvas, "Algorithm", versions.getOrDefault("strategyVersion", "Not recorded"), x + 10, cursor, width - 20);
         cursor = keyValue(canvas, "Strategy", versions.getOrDefault("strategyId", drawing.strategy()), x + 10, cursor, width - 20);
         cursor = keyValue(canvas, "Rule release", versions.getOrDefault("ruleVersion", "Not recorded"), x + 10, cursor, width - 20);

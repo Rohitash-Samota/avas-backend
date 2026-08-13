@@ -294,6 +294,66 @@ class AuthApiIntegrationTest {
     }
 
     @Test
+    void registeredIndividualCanCreateAndUpdateAProjectWithRequiredPermissions() throws Exception {
+        var suffix = UUID.randomUUID().toString().substring(0, 8);
+        var token = registerAndToken("individual-journey-" + suffix + "@example.com");
+
+        var created = mvc.perform(post("/api/v1/projects")
+                        .header("Authorization", "Bearer " + token)
+                        .header("X-Active-Role", "INDIVIDUAL")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "name", "Individual project", "startMode", "PLOT"))))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("X-Active-Role", "INDIVIDUAL"))
+                .andExpect(jsonPath("$.name").value("Individual project"))
+                .andReturn().getResponse();
+        var projectId = json.readTree(created.getContentAsString()).path("id").asText();
+
+        mvc.perform(put("/api/v1/projects/{projectId}/basic-details", projectId)
+                        .header("Authorization", "Bearer " + token)
+                        .header("X-Active-Role", "INDIVIDUAL")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "plotWidth", 30, "plotLength", 50, "roadFacing", "EAST", "city", "Jaipur",
+                                "floors", 2, "budget", 5000000, "category", "STANDARD",
+                                "family", Map.of("adults", 2, "children", 1, "seniorCitizens", 0,
+                                        "regularGuests", false),
+                                "preferences", List.of("More bedrooms")))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REQUIREMENTS_IN_PROGRESS"));
+    }
+
+    @Test
+    void administratorCannotDisableOrStripRequiredIndividualAccess() throws Exception {
+        var adminLogin = mvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "identifier", "platform.admin", "password", "StrongAdmin@2026"))))
+                .andExpect(status().isOk()).andReturn().getResponse();
+        var token = json.readTree(adminLogin.getContentAsString()).path("accessToken").asText();
+
+        mvc.perform(put("/api/v1/admin/roles/INDIVIDUAL")
+                        .header("Authorization", "Bearer " + token)
+                        .header("X-Active-Role", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("active", false))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(
+                        "Individual customer must remain active with all required customer journey permissions"));
+
+        mvc.perform(put("/api/v1/admin/roles/INDIVIDUAL")
+                        .header("Authorization", "Bearer " + token)
+                        .header("X-Active-Role", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "active", true, "permissions", List.of("PROJECT_CREATE", "PROJECT_READ")))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(
+                        "Individual customer must remain active with all required customer journey permissions"));
+    }
+
+    @Test
     void projectListAndReadsAreScopedToTheAuthenticatedOwner() throws Exception {
         var suffix = UUID.randomUUID().toString().substring(0, 8);
         var first = registerAndToken("owner-" + suffix + "@example.com");

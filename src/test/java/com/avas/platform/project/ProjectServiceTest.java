@@ -48,9 +48,34 @@ class ProjectServiceTest {
             assertThat(drawing.explanations()).anyMatch(explanation -> explanation.contains("Professional review required"));
         });
 
+        var automaticallyFrozen = service.estimates(project.id());
+        assertThat(automaticallyFrozen).hasSize(3);
+        assertThat(automaticallyFrozen.get(0).recommended())
+                .isLessThan(automaticallyFrozen.get(1).recommended());
+        assertThat(automaticallyFrozen.get(1).recommended())
+                .isLessThan(automaticallyFrozen.get(2).recommended());
+
         var estimate = service.generateEstimate(project.id(), drawings.get(1).id(), "INDIVIDUAL");
-        assertThat(estimate.items()).hasSize(7);
+        assertThat(estimate.id()).isEqualTo(automaticallyFrozen.get(1).id());
+        assertThat(service.estimates(project.id())).hasSize(3);
+        assertThat(estimate.items()).hasSizeGreaterThan(16);
         assertThat(estimate.low()).isLessThan(estimate.high());
+        assertThat(estimate.pricingCity()).isEqualTo("Jaipur");
+        assertThat(estimate.items()).extracting(EstimateItem::code)
+                .contains("LIFT_SHAFT_PROVISION")
+                .doesNotContain("PASSENGER_LIFT");
+        assertThat(estimate.items()).filteredOn(item -> item.evidenceId() != null)
+                .allSatisfy(item -> assertThat(item.evidenceId()).doesNotStartWith("JPR-"));
+        assertThat(estimate.items().stream().mapToLong(EstimateItem::amount).sum())
+                .isEqualTo(estimate.recommended());
+        assertThat(estimate.subtotal() + estimate.taxTotal() + estimate.contingency())
+                .isEqualTo(estimate.recommended());
+        var fallbackCore = estimate.items().stream()
+                .filter(item -> !"ADJUSTMENT".equals(item.itemType()))
+                .filter(item -> !item.code().equals("LIFT_SHAFT_PROVISION"))
+                .filter(item -> !item.code().equals("PASSENGER_LIFT"))
+                .mapToLong(EstimateItem::amount).sum();
+        assertThat(fallbackCore).isEqualTo(2_600L * drawings.get(1).builtUpArea());
         var validation = service.validation(drawings.get(1).id());
         assertThat(validation.status()).isEqualTo(EngineStatus.EXPERT_REVIEW);
         var buildingRules = validation.gates().stream()
@@ -61,14 +86,11 @@ class ProjectServiceTest {
                 .doesNotContain("No unresolved hard constraints");
         var estimateEvidence = validation.gates().stream()
                 .filter(gate -> gate.name().equals("Estimate evidence")).findFirst().orElseThrow();
-        assertThat(estimateEvidence.status()).isEqualTo("REVIEW_REQUIRED");
-        assertThat(estimateEvidence.detail()).contains("outside the stored recommendation cost basis")
-                .contains("recalibrated");
+        assertThat(estimateEvidence.status()).isEqualTo("PASSED");
+        assertThat(estimateEvidence.detail()).contains("accepted freshness window");
         assertThat(validation.professionalReview()).containsAll(drawings.get(1).hardViolations());
         assertThat(drawings.get(1).hardViolations())
-                .contains("Programme gap: placed built-up area " + drawings.get(1).builtUpArea()
-                        + " sq ft is outside recommended " + recommendation.builtUpAreaMinimum() + "-"
-                        + recommendation.builtUpAreaMaximum() + " sq ft cost basis");
+                .noneMatch(value -> value.startsWith("Programme gap: placed built-up area"));
         assertThat(service.get(project.id()).status()).isEqualTo("REVIEW_REQUIRED");
     }
 
@@ -89,6 +111,30 @@ class ProjectServiceTest {
                 .filteredOn(DrawingCandidate::conceptApproved)
                 .extracting(DrawingCandidate::id)
                 .containsExactly(drawings.get(2).id());
+    }
+
+    @Test
+    void pricingFailureLeavesNoPartialGenerationArtifacts() {
+        var failingCosting = new CostingService(new QuantityTakeoffService(), query -> {
+            throw new IllegalStateException("Pricing temporarily unavailable");
+        });
+        var failing = new ProjectService(new GeometryEngine(), "RJ-JDA-2026.08", "AVAS-KB-2026.08",
+                "layout-parameters-2.0.0", "governed-takeoff-2.0.0", failingCosting);
+        var project = failing.create(new CreateProjectRequest("Failure-safe home", StartMode.PLOT),
+                "INDIVIDUAL");
+        failing.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = failing.generateRecommendation(project.id(), "INDIVIDUAL");
+        failing.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> failing.generateDrawings(project.id(), "INDIVIDUAL"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Pricing temporarily unavailable");
+        assertThat(failing.drawings(project.id())).isEmpty();
+        assertThat(failing.estimates(project.id())).isEmpty();
+        assertThat(failing.audit(project.id())).noneMatch(event ->
+                event.action().equals("LAYOUT_CANDIDATES_GENERATED")
+                        || event.action().equals("ESTIMATE_AUTO_GENERATED"));
     }
 
     private BasicDetailsRequest details() {

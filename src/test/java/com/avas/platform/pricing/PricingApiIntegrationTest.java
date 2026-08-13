@@ -9,10 +9,13 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -37,6 +40,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class PricingApiIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
+    @Autowired CostRateProvider rates;
 
     @Test
     void governsPriceEvidenceAndProducesAnExplainableBudgetWithConsentedFeedback() throws Exception {
@@ -139,6 +143,51 @@ class PricingApiIntegrationTest {
         mvc.perform(put("/api/v1/admin/models/{id}/activate", modelId)
                         .header("Authorization", bearer(admin)).header("X-Active-Role", "ADMIN"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("ACTIVE"));
+    }
+
+    @Test
+    void exposesApprovedBrandedMaterialAsAStablePublicCostRateSnapshot() throws Exception {
+        var builder = register("BUILDER");
+        var result = mvc.perform(post("/api/v1/pricing/submissions")
+                        .header("Authorization", bearer(builder)).header("X-Active-Role", "BUILDER")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.ofEntries(
+                                Map.entry("itemName", "Premium OPC cement"),
+                                Map.entry("itemType", "MATERIAL"), Map.entry("category", "CEMENT"),
+                                Map.entry("qualityTier", "PREMIUM"),
+                                Map.entry("city", "Jaipur, Rajasthan"), Map.entry("unit", "BAG"),
+                                Map.entry("unitPrice", 415), Map.entry("observedOn", LocalDate.now().toString()),
+                                Map.entry("supplierName", "Approved Jaipur Supplier"),
+                                Map.entry("source", "AUTHORIZED_DEALER_QUOTE"),
+                                Map.entry("brandName", "UltraTech"), Map.entry("productCode", "OPC-53"),
+                                Map.entry("specification", "53 grade OPC, 50 kg bag"),
+                                Map.entry("materialIncluded", true)))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.brandName").value("UltraTech"))
+                .andExpect(jsonPath("$.productCode").value("OPC-53"))
+                .andExpect(jsonPath("$.specification").value("53 grade OPC, 50 kg bag"))
+                .andReturn();
+        var publicId = json.readTree(result.getResponse().getContentAsString()).path("id").asText();
+
+        var admin = login("platform.admin", "StrongAdmin@2026");
+        mvc.perform(put("/api/v1/admin/pricing/submissions/{id}/decision", publicId)
+                        .header("Authorization", bearer(admin)).header("X-Active-Role", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVED\",\"note\":\"Brand and product verified\"}"))
+                .andExpect(status().isOk());
+
+        var snapshot = rates.resolve(new CostRateQuery("tenant-test", "Jaipur", PriceCategory.PREMIUM,
+                LocalDate.now(), List.of(new CostRateRequirement("CEMENT", PriceItemType.MATERIAL,
+                        "CEMENT", "BAG", new BigDecimal("100.000")))));
+
+        assertThat(snapshot.city()).isEqualTo("Jaipur");
+        assertThat(snapshot.evidence()).singleElement().satisfies(evidence -> {
+            assertThat(evidence.evidenceId()).isEqualTo(publicId);
+            assertThat(evidence.brandName()).isEqualTo("UltraTech");
+            assertThat(evidence.productCode()).isEqualTo("OPC-53");
+            assertThat(evidence.specification()).isEqualTo("53 grade OPC, 50 kg bag");
+            assertThat(evidence.unitPrice()).isEqualByComparingTo("415.00");
+        });
     }
 
     private JsonNode register(String accountType) throws Exception {

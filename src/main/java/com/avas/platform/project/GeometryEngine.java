@@ -37,6 +37,12 @@ class GeometryEngine {
 
     List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
             Recommendation recommendation, Map<String, String> versions) {
+        return generate(projectId, version, details, recommendation, versions, null);
+    }
+
+    List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
+            Recommendation recommendation, Map<String, String> versions,
+            PlanningParameterSet parameterSet) {
         if (details.plotWidth() < 10 || details.plotLength() < 10) {
             throw new IllegalArgumentException("Plot dimensions must each be at least 10 feet");
         }
@@ -44,17 +50,22 @@ class GeometryEngine {
         var candidates = new ArrayList<DrawingCandidate>();
         for (int index = 0; index < STRATEGIES.size(); index++) {
             var strategy = STRATEGIES.get(index);
+            var variant = variantFor(parameterSet, strategy.key());
+            var optionParameters = optionParameters(details.parameters(), variant);
             var rooms = packRooms(details.plotWidth(), details.plotLength(), details.floors(), strategy,
-                    recommendation);
+                    recommendation, optionParameters, variant);
             var doors = doorsFor(rooms, details.roadFacing());
             var windows = windowsFor(rooms, doors);
             // Rooms already contain every requested floor, so this is an aggregate area and must
-            // not be multiplied by the floor count a second time.
-            var aggregateProgramArea = rooms.stream().mapToDouble(RoomGeometry::area).sum();
-            var builtUpArea = (int) Math.round(aggregateProgramArea);
+            // not be multiplied by the floor count a second time. Outdoor programme zones are
+            // deliberately excluded: pricing them again at the full built-up rate would double
+            // count roof terraces and overstate open parking/courtyard construction.
+            var constructedArea = rooms.stream().filter(this::countsAsBuiltUp)
+                    .mapToDouble(RoomGeometry::area).sum();
+            var builtUpArea = (int) Math.round(constructedArea);
             var violations = new ArrayList<>(validate(details.plotWidth(), details.plotLength(), rooms));
             violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
-            var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea);
+            var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea, optionParameters, variant);
             violations.addAll(programmeGaps);
             var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
             var provenance = new LinkedHashMap<>(versions);
@@ -69,13 +80,46 @@ class GeometryEngine {
             provenance.put("roadFacing", details.roadFacing().name());
             provenance.put("optimizerSeed", Integer.toUnsignedString(
                     Objects.hash(projectId, version, strategy.key())));
+            if (parameterSet != null) {
+                provenance.put("parameterProvider", safe(parameterSet.provider(), "DETERMINISTIC"));
+                provenance.put("parameterModel", safe(parameterSet.model(), "avas-parameter-rules-1.0.0"));
+                provenance.put("promptVersion", safe(parameterSet.promptVersion(), "home-parameters-1.0.0"));
+                provenance.put("parameterSchemaVersion", safe(parameterSet.schemaVersion(), "home-parameters-1"));
+                provenance.put("parameterFallback", String.valueOf(parameterSet.fallbackUsed()));
+                if (parameterSet.requestId() != null) provenance.put("parameterRequestId", parameterSet.requestId());
+                if (parameterSet.providerRequestId() != null) {
+                    provenance.put("parameterProviderRequestId", parameterSet.providerRequestId());
+                }
+                if (!parameterSet.warnings().isEmpty()) {
+                    provenance.put("parameterWarning", String.join(" | ", parameterSet.warnings()));
+                }
+                if ("OPENAI".equalsIgnoreCase(parameterSet.provider()) && !parameterSet.fallbackUsed()) {
+                    provenance.put("generationMode", "AI_PARAMETER_ASSISTED_DETERMINISTIC_GEOMETRY");
+                    provenance.put("generationModel", parameterSet.model());
+                    provenance.put("modelVersion", parameterSet.model());
+                }
+            }
+            provenance.put("homeType", optionParameters.homeType());
+            provenance.put("staircaseType", optionParameters.staircaseType());
+            provenance.put("liftProvision", optionParameters.liftProvision());
+            provenance.put("balconyCount", String.valueOf(optionParameters.balconyCount()));
+            provenance.put("terraceRequired", String.valueOf(optionParameters.terraceRequired()));
+            provenance.put("courtyardRequired", String.valueOf(optionParameters.courtyardRequired()));
+            provenance.put("accessibleGroundFloor", String.valueOf(optionParameters.accessibleGroundFloor()));
+            provenance.put("parkingCars", String.valueOf(optionParameters.parkingCars()));
+            provenance.put("solarReady", String.valueOf(optionParameters.solarReady()));
+            provenance.put("rainwaterHarvesting", String.valueOf(optionParameters.rainwaterHarvesting()));
+            if (variant != null) {
+                provenance.put("parameterVariantTitle", variant.title());
+                provenance.put("duplexZoning", variant.duplexZoning());
+            }
 
             candidates.add(new DrawingCandidate(
                     "drawing-" + projectId + "-v" + version + "-" + (index + 1),
                     projectId,
                     version,
                     strategy.key(),
-                    strategy.name(),
+                    variant == null || variant.title() == null ? strategy.name() : variant.title(),
                     builtUpArea,
                     recommendation.estimatedCostLow(),
                     recommendation.estimatedCostHigh(),
@@ -89,7 +133,7 @@ class GeometryEngine {
                     List.of(
                             "Verify setbacks against the applicable local authority release.",
                             "A licensed structural engineer must approve the final grid."),
-                    programmeExplanations(strategy, programmeGaps),
+                    programmeExplanations(strategy, variant, programmeGaps),
                     Map.copyOf(provenance),
                     reviewRequired ? "EXPERT_REVIEW" : "SUCCESS",
                     false,
@@ -98,12 +142,20 @@ class GeometryEngine {
         return List.copyOf(candidates);
     }
 
-    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms, int builtUpArea) {
+    private boolean countsAsBuiltUp(RoomGeometry room) {
+        return switch (room.type()) {
+            case "PARKING", "COURTYARD_PARKING", "COURTYARD", "OPEN_SPACE", "TERRACE" -> false;
+            default -> true;
+        };
+    }
+
+    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms, int builtUpArea,
+            HomeParameters parameters, PlanningParameterVariant variant) {
         var gaps = new ArrayList<String>();
         var bedrooms = rooms.stream().filter(room -> room.type().contains("BEDROOM")).count();
         var attachedBathrooms = rooms.stream().filter(room -> room.type().contains("ATTACHED_BATHROOM")).count();
         var commonBathrooms = rooms.stream().filter(room -> "BATHROOM".equals(room.type())).count();
-        var parkingBays = rooms.stream().filter(room -> room.type().contains("PARKING")).count();
+        var parkingBays = representedParkingBays(rooms);
         if (bedrooms != recommendation.bedrooms()) {
             gaps.add("Programme gap: " + bedrooms + " of " + recommendation.bedrooms()
                     + " recommended bedrooms represented");
@@ -133,19 +185,115 @@ class GeometryEngine {
                         || room.type().contains("BALCONY") || room.type().contains("FUTURE_EXPANSION"))) {
             gaps.add("Programme gap: recommended future-expansion zone is not represented");
         }
-        if (builtUpArea < recommendation.builtUpAreaMinimum()
-                || builtUpArea > recommendation.builtUpAreaMaximum()) {
+        // Packing and whole-square-foot display introduce small boundary differences. Treat a
+        // two-percent edge variance as rounding tolerance, not a cost-basis failure.
+        if (builtUpArea < recommendation.builtUpAreaMinimum() * .98
+                || builtUpArea > recommendation.builtUpAreaMaximum() * 1.02) {
             gaps.add("Programme gap: placed built-up area " + builtUpArea + " sq ft is outside recommended "
                     + recommendation.builtUpAreaMinimum() + "-" + recommendation.builtUpAreaMaximum()
                     + " sq ft cost basis");
         }
+        var liftCount = rooms.stream().filter(room -> "LIFT_SHAFT".equals(room.type())).count();
+        if (!"NONE".equals(parameters.liftProvision()) && liftCount == 0) {
+            gaps.add("Programme gap: requested " + parameters.liftProvision().toLowerCase(Locale.ROOT)
+                    .replace('_', ' ') + " lift provision is not represented");
+        }
+        var balconies = rooms.stream().filter(room -> "BALCONY".equals(room.type())).count();
+        if (balconies < parameters.balconyCount()) {
+            gaps.add("Programme gap: " + balconies + " of " + parameters.balconyCount()
+                    + " requested balconies represented");
+        }
+        if (parameters.terraceRequired()
+                && rooms.stream().noneMatch(room -> "TERRACE".equals(room.type()))) {
+            gaps.add("Programme gap: requested terrace is not represented");
+        }
+        if (parameters.courtyardRequired()
+                && rooms.stream().noneMatch(room -> room.type().contains("COURTYARD"))) {
+            gaps.add("Programme gap: requested courtyard is not represented");
+        }
+        var representedParking = representedParkingBays(rooms);
+        if (representedParking < parameters.parkingCars()) {
+            gaps.add("Programme gap: " + representedParking + " of " + parameters.parkingCars()
+                    + " requested parking bays represented");
+        }
+        gaps.addAll(roomTargetGaps(rooms, variant));
         return List.copyOf(gaps);
     }
 
+    private long representedParkingBays(List<RoomGeometry> rooms) {
+        // One parking programme rectangle may intentionally hold multiple bays. Capacity must be
+        // dimension-aware so a long four-foot strip can never masquerade as usable parking area.
+        return rooms.stream().filter(room -> room.type().contains("PARKING"))
+                .mapToLong(room -> Math.min(3, Math.max(
+                        (long) Math.floor(room.width() / 8d)
+                                * (long) Math.floor(room.length() / 16d),
+                        (long) Math.floor(room.width() / 16d)
+                                * (long) Math.floor(room.length() / 8d))))
+                .sum();
+    }
+
+    private List<String> roomTargetGaps(List<RoomGeometry> rooms, PlanningParameterVariant variant) {
+        if (variant == null || variant.roomTargets() == null || variant.roomTargets().isEmpty()) return List.of();
+        var required = new LinkedHashMap<String, Integer>();
+        for (var target : variant.roomTargets()) {
+            if (!"REQUIRED".equals(target.priority())) continue;
+            required.merge(target.floor() + "|" + target.roomType(), target.count(), Integer::sum);
+        }
+        var gaps = new ArrayList<String>();
+        required.forEach((key, count) -> {
+            var separator = key.indexOf('|');
+            var floor = key.substring(0, separator);
+            var type = key.substring(separator + 1);
+            var represented = rooms.stream().filter(room -> floor.equals(normalizedFloor(room.floor())))
+                    .filter(room -> roomMatchesTarget(room.type(), type)).count();
+            if (represented < count) {
+                gaps.add("Programme gap: " + represented + " of " + count + " required "
+                        + type.toLowerCase(Locale.ROOT).replace('_', ' ') + " spaces represented on "
+                        + floor.toLowerCase(Locale.ROOT) + " floor");
+            }
+        });
+        return List.copyOf(gaps);
+    }
+
+    private boolean roomMatchesTarget(String actual, String target) {
+        if (actual.equals(target)) return true;
+        return "BEDROOM".equals(target) && actual.endsWith("BEDROOM");
+    }
+
     private List<String> programmeExplanations(Strategy strategy, List<String> gaps) {
+        return programmeExplanations(strategy, null, gaps);
+    }
+
+    private List<String> programmeExplanations(Strategy strategy, PlanningParameterVariant variant,
+            List<String> gaps) {
         var explanations = new ArrayList<>(strategy.explanations());
+        if (variant != null && variant.explanations() != null) explanations.addAll(variant.explanations());
         gaps.forEach(gap -> explanations.add("Professional review required - " + gap));
         return List.copyOf(explanations);
+    }
+
+    private PlanningParameterVariant variantFor(PlanningParameterSet parameters, String strategy) {
+        if (parameters == null || parameters.variants() == null) return null;
+        return parameters.variants().stream().filter(value -> strategy.equals(value.strategy()))
+                .findFirst().orElse(null);
+    }
+
+    private HomeParameters optionParameters(HomeParameters requested, PlanningParameterVariant variant) {
+        if (variant == null) return requested;
+        // Explicit circulation choices remain hard bounds. A generated option may add optional
+        // lifestyle/future-ready provisions, but it cannot remove anything the customer requested.
+        return new HomeParameters(requested.homeType(), requested.staircaseType(), requested.liftProvision(),
+                Math.max(requested.balconyCount(), variant.balconyCount()),
+                requested.terraceRequired() || variant.terraceRequired(),
+                requested.courtyardRequired() || variant.courtyardRequired(),
+                requested.accessibleGroundFloor() || variant.accessibleGroundFloor(),
+                Math.max(requested.parkingCars(), variant.parkingCars()),
+                requested.solarReady() || variant.solarReady(),
+                requested.rainwaterHarvesting() || variant.rainwaterHarvesting());
+    }
+
+    private String safe(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     List<String> validate(double plotWidth, double plotLength, List<RoomGeometry> rooms) {
@@ -187,6 +335,7 @@ class GeometryEngine {
             violations.add("Geometry floors " + representedFloors + " do not match requested floors " + expectedFloors);
         }
         validateStairCores(expectedFloors, rooms, violations);
+        validateLiftCores(expectedFloors, rooms, violations);
         var envelopes = new LinkedHashMap<String, Envelope>();
         for (var floor : representedFloors) {
             envelopes.put(floor, envelopeFor(rooms.stream()
@@ -216,6 +365,27 @@ class GeometryEngine {
             } else if (!sameBounds(reference, stairs.getFirst())) {
                 violations.add("Stair cores are not vertically aligned: " + reference.id()
                         + " differs from " + stairs.getFirst().id());
+            }
+        }
+    }
+
+    private void validateLiftCores(LinkedHashSet<String> expectedFloors, List<RoomGeometry> rooms,
+            List<String> violations) {
+        var lifts = rooms.stream().filter(room -> "LIFT_SHAFT".equals(room.type())).toList();
+        if (lifts.isEmpty()) return;
+        RoomGeometry reference = null;
+        for (var floor : expectedFloors) {
+            var floorLifts = lifts.stream()
+                    .filter(room -> floor.equals(normalizedFloor(room.floor()))).toList();
+            if (floorLifts.size() != 1) {
+                violations.add(floor + " floor requires exactly one aligned LIFT_SHAFT; found "
+                        + floorLifts.size());
+                continue;
+            }
+            if (reference == null) reference = floorLifts.getFirst();
+            else if (!sameBounds(reference, floorLifts.getFirst())) {
+                violations.add("Lift shafts are not vertically aligned: " + reference.id()
+                        + " differs from " + floorLifts.getFirst().id());
             }
         }
     }
@@ -471,12 +641,14 @@ class GeometryEngine {
     }
 
     private List<RoomGeometry> packRooms(double width, double length, int floorCount, Strategy strategy,
-            Recommendation recommendation) {
+            Recommendation recommendation, HomeParameters parameters, PlanningParameterVariant variant) {
         var rooms = new ArrayList<RoomGeometry>();
         var bedroomAllocation = bedroomAllocation(recommendation.bedrooms(), floorCount);
+        var liftRequired = floorCount > 1 && !"NONE".equals(parameters.liftProvision());
         for (var floorIndex = 0; floorIndex < floorCount; floorIndex++) {
-            rooms.addAll(packFloor(width, length, strategy, floorIndex, bedroomAllocation.get(floorIndex),
-                    recommendation.seniorCitizenBedroom()));
+            rooms.addAll(packFloor(width, length, strategy, floorIndex, floorCount,
+                    bedroomAllocation.get(floorIndex),
+                    recommendation.seniorCitizenBedroom(), liftRequired, parameters, variant));
         }
         return List.copyOf(rooms);
     }
@@ -498,7 +670,8 @@ class GeometryEngine {
     }
 
     private List<RoomGeometry> packFloor(double width, double length, Strategy strategy, int floorIndex,
-            int bedroomCount, boolean seniorBedroomRequired) {
+            int floorCount, int bedroomCount, boolean seniorBedroomRequired, boolean liftRequired,
+            HomeParameters parameters, PlanningParameterVariant variant) {
         var innerWidth = width * .82;
         var innerLength = length * .76;
         var startX = width * .09;
@@ -512,7 +685,7 @@ class GeometryEngine {
         if (floorIndex == 0) {
             return packGroundFloor(startX, startY, baseLeftWidth, baseRightWidth,
                     baseTopLength, baseBottomLength,
-                    bedroomCount, seniorBedroomRequired);
+                    bedroomCount, seniorBedroomRequired, liftRequired, parameters, variant);
         }
         var columnAdjustment = floorIndex == 1 ? .04 : -.03;
         var rowAdjustment = floorIndex == 1 ? -.03 : .03;
@@ -528,37 +701,55 @@ class GeometryEngine {
         var middleLength = coreY - middleY;
         var types = roomProgram(floorIndex, bedroomCount);
 
-        return List.of(
-                room(floorIndex, 1, types.get(0), startX, startY, topLeftWidth, topLength),
-                room(floorIndex, 2, types.get(1), startX + topLeftWidth, startY, topRightWidth, topLength),
-                room(floorIndex, 3, types.get(2), startX, middleY, baseLeftWidth, buildingBottom - middleY),
-                room(floorIndex, 4, types.get(3), coreX, middleY,
-                        baseRightWidth * .52, middleLength),
-                room(floorIndex, 5, types.get(4), coreX + baseRightWidth * .52,
-                        middleY, baseRightWidth * .48, middleLength),
-                room(floorIndex, 6, types.get(5), coreX, coreY, coreWidth, coreLength),
-                room(floorIndex, 7, types.get(6), coreX + coreWidth,
-                        coreY, baseRightWidth * .24, coreLength),
-                room(floorIndex, 8, types.get(7), coreX + baseRightWidth * .62,
-                        coreY, baseRightWidth * .38, coreLength));
+        var rooms = new ArrayList<RoomGeometry>();
+        rooms.add(room(floorIndex, 1, types.get(0), startX, startY, topLeftWidth, topLength));
+        rooms.add(room(floorIndex, 2, types.get(1), startX + topLeftWidth, startY, topRightWidth, topLength));
+        rooms.add(room(floorIndex, 3, types.get(2), startX, middleY,
+                baseLeftWidth, buildingBottom - middleY));
+        rooms.add(room(floorIndex, 4, types.get(3), coreX, middleY,
+                baseRightWidth * .52, middleLength));
+        rooms.add(room(floorIndex, 5, types.get(4), coreX + baseRightWidth * .52,
+                middleY, baseRightWidth * .48, middleLength));
+        addVerticalCore(rooms, floorIndex, 6, coreX, coreY, coreWidth, coreLength, liftRequired);
+        var nextIndex = liftRequired ? 8 : 7;
+        rooms.add(room(floorIndex, nextIndex++, types.get(6), coreX + coreWidth,
+                coreY, baseRightWidth * .24, coreLength));
+        addOutdoorOrUtilityZones(rooms, floorIndex, floorCount, nextIndex,
+                coreX + baseRightWidth * .62, coreY, baseRightWidth * .38, coreLength,
+                types.get(7), parameters);
+        return List.copyOf(rooms);
     }
 
     private List<RoomGeometry> packGroundFloor(double startX, double startY, double leftWidth,
             double rightWidth, double topLength, double bottomLength, int bedroomCount,
-            boolean seniorBedroomRequired) {
+            boolean seniorBedroomRequired, boolean liftRequired, HomeParameters parameters,
+            PlanningParameterVariant variant) {
         var rooms = new ArrayList<RoomGeometry>();
         var roomIndex = 1;
-        var parkingType = bedroomCount >= 6 ? "BEDROOM" : "PARKING";
-        rooms.add(room(0, roomIndex++, parkingType, startX, startY, leftWidth, topLength));
+        var parkingType = parameters.courtyardRequired()
+                ? parameters.parkingCars() > 0 ? "COURTYARD_PARKING" : "COURTYARD"
+                : parameters.parkingCars() > 0 ? bedroomCount >= 6 ? "BEDROOM" : "PARKING" : "OPEN_SPACE";
+        // The default 40 x 60 brief requests two cars. Give parking a genuine 8 x 16 ft module
+        // per side-by-side bay when the envelope permits it, while retaining at least eight feet
+        // for the adjacent living zone. Requests that cannot physically fit remain validation gaps.
+        var totalWidth = leftWidth + rightWidth;
+        var parkingWidth = leftWidth;
+        if (parkingType.contains("PARKING") && topLength >= 16) {
+            var desiredWidth = Math.max(leftWidth, parameters.parkingCars() * 8d);
+            parkingWidth = round2(Math.min(desiredWidth, Math.max(leftWidth, totalWidth - 8d)));
+        }
+        rooms.add(room(0, roomIndex++, parkingType, startX, startY, parkingWidth, topLength));
 
         var rightX = startX + leftWidth;
+        var topRightX = startX + parkingWidth;
+        var topRightWidth = round2(totalWidth - parkingWidth);
         if (bedroomCount >= 3) {
-            var livingWidth = rightWidth * .55;
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", rightX, startY, livingWidth, topLength));
-            rooms.add(room(0, roomIndex++, "BEDROOM", rightX + livingWidth, startY,
-                    rightWidth - livingWidth, topLength));
+            var livingWidth = topRightWidth * .55;
+            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY, livingWidth, topLength));
+            rooms.add(room(0, roomIndex++, "BEDROOM", topRightX + livingWidth, startY,
+                    topRightWidth - livingWidth, topLength));
         } else {
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", rightX, startY, rightWidth, topLength));
+            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY, topRightWidth, topLength));
         }
 
         var primaryType = seniorBedroomRequired ? "SENIOR_BEDROOM" : "MASTER_BEDROOM";
@@ -579,14 +770,52 @@ class GeometryEngine {
                 startY + topLength, rightWidth * .52, bottomLength * .58));
         rooms.add(room(0, roomIndex++, "KITCHEN", rightX + rightWidth * .52,
                 startY + topLength, rightWidth * .48, bottomLength * .58));
-        rooms.add(room(0, roomIndex++, "STAIRCASE", rightX,
-                startY + topLength + bottomLength * .58, rightWidth * .38, bottomLength * .42));
+        addVerticalCore(rooms, 0, roomIndex, rightX,
+                startY + topLength + bottomLength * .58, rightWidth * .38, bottomLength * .42,
+                liftRequired);
+        roomIndex += liftRequired ? 2 : 1;
         rooms.add(room(0, roomIndex++, "BATHROOM", rightX + rightWidth * .38,
                 startY + topLength + bottomLength * .58, rightWidth * .24, bottomLength * .42));
         rooms.add(room(0, roomIndex, bedroomCount >= 4 ? "BEDROOM" : "UTILITY",
                 rightX + rightWidth * .62, startY + topLength + bottomLength * .58,
                 rightWidth * .38, bottomLength * .42));
         return List.copyOf(rooms);
+    }
+
+    private void addVerticalCore(List<RoomGeometry> rooms, int floorIndex, int startIndex,
+            double x, double y, double width, double length, boolean liftRequired) {
+        if (!liftRequired) {
+            rooms.add(room(floorIndex, startIndex, "STAIRCASE", x, y, width, length));
+            return;
+        }
+        // The stair and lift share one aligned structural core on every floor. Keeping both
+        // rectangles identical across storeys makes the shaft provision auditable and validates
+        // the duplex circulation stack without inventing construction details.
+        var stairWidth = round2(width * .68);
+        rooms.add(room(floorIndex, startIndex, "STAIRCASE", x, y, stairWidth, length));
+        rooms.add(room(floorIndex, startIndex + 1, "LIFT_SHAFT", x + stairWidth, y,
+                round2(width - stairWidth), length));
+    }
+
+    private void addOutdoorOrUtilityZones(List<RoomGeometry> rooms, int floorIndex, int floorCount,
+            int startIndex, double x, double y, double width, double length, String fallbackType,
+            HomeParameters parameters) {
+        var zones = new ArrayList<String>();
+        var upperFloorCount = Math.max(1, floorCount - 1);
+        var baseBalconies = parameters.balconyCount() / upperFloorCount;
+        var extraBalconies = parameters.balconyCount() % upperFloorCount;
+        var upperIndex = Math.max(0, floorIndex - 1);
+        var balconiesHere = baseBalconies + (upperIndex < extraBalconies ? 1 : 0);
+        for (var index = 0; index < balconiesHere; index++) zones.add("BALCONY");
+        if (floorIndex == floorCount - 1 && parameters.terraceRequired()) zones.add("TERRACE");
+        if (zones.isEmpty()) zones.add(fallbackType);
+        var zoneWidth = width / zones.size();
+        for (var index = 0; index < zones.size(); index++) {
+            var fromX = x + zoneWidth * index;
+            var actualWidth = index == zones.size() - 1 ? x + width - fromX : zoneWidth;
+            rooms.add(room(floorIndex, startIndex + index, zones.get(index), fromX, y,
+                    actualWidth, length));
+        }
     }
 
     private List<String> roomProgram(int floorIndex, int bedroomCount) {
@@ -786,7 +1015,9 @@ class GeometryEngine {
             var windowNumber = 1;
             for (var room : floorRooms) {
                 if (room.type().contains("PARKING") || room.type().contains("STAIR")
-                        || room.type().contains("TERRACE") || room.type().contains("BALCONY")) continue;
+                        || room.type().contains("LIFT") || room.type().contains("TERRACE")
+                        || room.type().contains("BALCONY") || room.type().contains("COURTYARD")
+                        || room.type().contains("OPEN_SPACE")) continue;
                 var sides = exteriorSides(room, envelope);
                 if (sides.isEmpty()) continue;
                 var window = exteriorWindow(room, sides, doors,

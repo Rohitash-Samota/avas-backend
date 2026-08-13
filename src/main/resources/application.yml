@@ -78,6 +78,11 @@ avas:
       key-id: ${RAZORPAY_KEY_ID:}
       key-secret: ${RAZORPAY_KEY_SECRET:}
       api-url: ${RAZORPAY_API_URL:https://api.razorpay.com/v1}
+  ai:
+    enabled: ${AVAS_AI_ENABLED:false}
+    base-url: ${AVAS_AI_BASE_URL:http://127.0.0.1:8090}
+    service-key: ${AVAS_AI_SERVICE_KEY:}
+    timeout-seconds: ${AVAS_AI_TIMEOUT_SECONDS:25}
   bootstrap-admin:
     enabled: ${AVAS_BOOTSTRAP_ADMIN_ENABLED:false}
     first-name: ${AVAS_BOOTSTRAP_ADMIN_FIRST_NAME:Platform}
@@ -90,5 +95,5 @@ avas:
   versions:
     rules: RJ-JDA-2026.08
     knowledge: AVAS-KB-2026.08
-    strategy: layout-heuristic-1.5.0
-    estimate-policy: planning-estimate-1.2.0
+    strategy: layout-parameters-2.0.0
+    estimate-policy: governed-takeoff-2.0.0

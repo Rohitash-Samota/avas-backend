@@ -62,9 +62,9 @@ class FloorPlanPdfServiceTest {
                     .contains("EST. BUILD COST")
                     .contains("ORIENTATION")
                     .contains("SERVER VECTOR RENDER")
-                    .contains("No generative AI model")
+                    .contains("DETERMINISTIC parameters")
                     .contains("AVAS deterministic layout engine")
-                    .contains("layout-heuristic-1.5.0")
+                    .contains("avas-backend-parameter-rules-1.0.0")
                     .contains("qualified architect and structural engineer before construction")
                     .doesNotContain("Image Not Available")
                     .doesNotContain("upper floors require separate layouts");

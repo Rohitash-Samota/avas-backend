@@ -47,6 +47,9 @@ class RelationalSchemaMigration implements ApplicationRunner {
                 "AVAS specification transactional schema", SPEC_SCHEMA);
         applyAction("V002__optional_email_compatibility",
                 "Allow username/mobile-only identities and orders", this::relaxOptionalEmails);
+        applyAction("V003__governed_price_product_metadata",
+                "Add brand, product code and specification to governed price evidence",
+                this::addGovernedPriceProductMetadata);
     }
 
     private void ensureLedger() {
@@ -98,12 +101,29 @@ class RelationalSchemaMigration implements ApplicationRunner {
                 "ALTER TABLE commerce_orders MODIFY COLUMN buyer_email VARCHAR(190) NULL");
     }
 
+    private void addGovernedPriceProductMetadata() {
+        addColumnIfMissing("price_submissions", "brand_name",
+                "ALTER TABLE price_submissions ADD COLUMN brand_name VARCHAR(120) NULL");
+        addColumnIfMissing("price_submissions", "product_code",
+                "ALTER TABLE price_submissions ADD COLUMN product_code VARCHAR(100) NULL");
+        addColumnIfMissing("price_submissions", "specification",
+                "ALTER TABLE price_submissions ADD COLUMN specification VARCHAR(1000) NULL");
+    }
+
     private void relaxIfRequired(String table, String column, String statement) {
         var required = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM information_schema.columns
                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? AND is_nullable = 'NO'
                 """, Integer.class, table, column);
         if (required != null && required > 0) jdbc.execute(statement);
+    }
+
+    private void addColumnIfMissing(String table, String column, String statement) {
+        var present = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, Integer.class, table, column);
+        if (present == null || present == 0) jdbc.execute(statement);
     }
 
     private String sha256(byte[] bytes) {

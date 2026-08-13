@@ -161,6 +161,11 @@ public class AuthService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Role contains an unknown permission");
         }
         var active = request.active() == null ? role.isActive() : request.active();
+        if ("INDIVIDUAL".equals(role.getCode())
+                && (!active || !permissions.containsAll(IdentityDefaults.REQUIRED_INDIVIDUAL_PERMISSIONS))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Individual customer must remain active with all required customer journey permissions");
+        }
         if ("ADMIN".equals(role.getCode()) && (!active || !permissions.containsAll(Set.of("USER_MANAGE", "ROLE_MANAGE")))) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Administrator must remain active with USER_MANAGE and ROLE_MANAGE permissions");

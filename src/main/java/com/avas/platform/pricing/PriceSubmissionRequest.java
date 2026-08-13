@@ -30,6 +30,9 @@ public record PriceSubmissionRequest(
         @DecimalMin("0.0") @DecimalMax("100.0") BigDecimal taxPercentage,
         Boolean materialIncluded,
         Boolean labourIncluded,
-        Boolean transportIncluded
+        Boolean transportIncluded,
+        @Size(max = 120) String brandName,
+        @Size(max = 100) String productCode,
+        @Size(max = 1000) String specification
 ) {
 }
