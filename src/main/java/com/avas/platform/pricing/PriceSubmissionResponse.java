@@ -39,7 +39,10 @@ public record PriceSubmissionResponse(
         Instant submittedAt,
         String brandName,
         String productCode,
-        String specification
+        String specification,
+        PriceSourceChannel sourceChannel,
+        String sourceUrl,
+        String collectorRunId
 ) {
     static PriceSubmissionResponse from(PriceSubmissionEntity value) {
         return new PriceSubmissionResponse(
@@ -76,6 +79,9 @@ public record PriceSubmissionResponse(
                 value.createdAt(),
                 value.brandName(),
                 value.productCode(),
-                value.specification());
+                value.specification(),
+                value.sourceChannel(),
+                value.sourceUrl(),
+                value.collectorRunId());
     }
 }

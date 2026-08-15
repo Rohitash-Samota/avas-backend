@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class GeometryEngineTest {
     private final GeometryEngine engine = new GeometryEngine();
@@ -293,10 +294,46 @@ class GeometryEngineTest {
                 .get(1);
         assertThat(normal.hardViolations()).noneMatch(value -> value.contains("parking bays represented"));
 
-        var narrowDetails = new BasicDetailsRequest(10, 180, Facing.NORTH, "Jaipur", 2, 7_000_000,
+        // 24 x 200 ft stays buildable after setbacks but leaves a 14 ft footprint, so the parking
+        // strip is too narrow for an 8 x 16 ft bay however much area it accumulates lengthwise.
+        var narrowDetails = new BasicDetailsRequest(24, 200, Facing.NORTH, "Jaipur", 2, 7_000_000,
                 Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
         var narrow = engine.generate("parking-narrow", 1, narrowDetails, recommendation(), versions()).get(1);
         assertThat(narrow.hardViolations()).anyMatch(value -> value.contains("parking bays represented"));
+    }
+
+    @Test
+    void plotWithNoBuildableFootprintIsRejectedInsteadOfIgnoringSetbacks() {
+        // A 10 ft frontage cannot absorb the assumed side setbacks. Packing rooms across the full
+        // width anyway would silently produce an illegal layout, so generation must refuse.
+        var unbuildable = new BasicDetailsRequest(10, 180, Facing.NORTH, "Jaipur", 2, 7_000_000,
+                Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
+
+        assertThatThrownBy(() -> engine.generate("unbuildable", 1, unbuildable, recommendation(), versions()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("expert review");
+    }
+
+    @Test
+    void everyCandidateKeepsBuiltUpRoomsInsideTheSetbackEnvelope() {
+        for (var width : List.of(24d, 30d, 40d, 55d)) {
+            for (var floors : List.of(1, 2, 3)) {
+                var details = new BasicDetailsRequest(width, 60, Facing.NORTH, "Jaipur", floors,
+                        7_000_000, Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Garden"));
+                var envelope = BuildableEnvelope.derive(details.boundary(),
+                        SetbackRule.assumedFor(details.plotArea(), floors), floors);
+
+                for (var candidate : engine.generate("envelope-" + width + "-" + floors, 1, details,
+                        recommendation(), versions(), null, envelope)) {
+                    assertThat(engine.validateEnvelope(envelope, candidate.geometry().rooms()))
+                            .as("setback encroachment for %s ft x 60 ft, %s floor(s)", width, floors)
+                            .isEmpty();
+                    assertThat(engine.validate(width, 60, candidate.geometry().rooms()))
+                            .as("overlap or boundary escape for %s ft x 60 ft, %s floor(s)", width, floors)
+                            .isEmpty();
+                }
+            }
+        }
     }
 
     private RoomGeometry withType(RoomGeometry room, String type) {

@@ -102,6 +102,19 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
     @Column(nullable = false, length = 20)
     private PriceSubmissionStatus status;
 
+    /** How this observation reached AVAS; drives how far it may influence a resolved rate. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "source_channel", nullable = false, length = 20)
+    private PriceSourceChannel sourceChannel;
+
+    /** Page the observation was read from, when it was collected automatically. */
+    @Column(name = "source_url", length = 1000)
+    private String sourceUrl;
+
+    /** Groups every row produced by one collector execution so a bad run can be retired together. */
+    @Column(name = "collector_run_id", length = 80)
+    private String collectorRunId;
+
     @Column(nullable = false)
     private int recordVersion;
 
@@ -117,7 +130,8 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
     protected PriceSubmissionEntity() {
     }
 
-    PriceSubmissionEntity(String tenantId, UUID submittedBy, String submittedRole, PriceSubmissionRequest request) {
+    PriceSubmissionEntity(String tenantId, UUID submittedBy, String submittedRole,
+            PriceSourceChannel channel, PriceSubmissionRequest request) {
         publicId = UUID.randomUUID();
         this.tenantId = tenantId;
         this.submittedBy = submittedBy;
@@ -145,6 +159,9 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
         labourIncluded = Boolean.TRUE.equals(request.labourIncluded());
         transportIncluded = Boolean.TRUE.equals(request.transportIncluded());
         status = PriceSubmissionStatus.PENDING;
+        sourceChannel = PriceSourceChannel.orDefault(channel);
+        sourceUrl = clean(request.sourceUrl());
+        collectorRunId = clean(request.collectorRunId());
         recordVersion = 1;
         createdAt = Instant.now();
     }
@@ -289,6 +306,18 @@ class PriceSubmissionEntity extends AbstractLongIdEntity {
 
     PriceSubmissionStatus status() {
         return status;
+    }
+
+    PriceSourceChannel sourceChannel() {
+        return sourceChannel == null ? PriceSourceChannel.USER : sourceChannel;
+    }
+
+    String sourceUrl() {
+        return sourceUrl;
+    }
+
+    String collectorRunId() {
+        return collectorRunId;
     }
 
     int recordVersion() {

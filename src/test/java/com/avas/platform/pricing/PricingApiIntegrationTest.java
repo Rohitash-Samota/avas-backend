@@ -190,6 +190,67 @@ class PricingApiIntegrationTest {
         });
     }
 
+    @Test
+    void aContributorCannotMintOfficialOrCollectedPriceEvidence() throws Exception {
+        var builder = register("BUILDER");
+
+        // Channel decides how much weight evidence carries, so it must not be self-asserted by
+        // whoever posts the body. Only an administrator may record these.
+        for (var claimed : List.of("OFFICIAL", "ADMIN", "SCRAPER")) {
+            mvc.perform(post("/api/v1/pricing/submissions")
+                            .header("Authorization", bearer(builder)).header("X-Active-Role", "BUILDER")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(brickSubmission(
+                                    Map.entry("sourceChannel", claimed)))))
+                    .andExpect(status().isForbidden());
+        }
+
+        // The same submission without a claimed channel is accepted at the contributor's own level.
+        mvc.perform(post("/api/v1/pricing/submissions")
+                        .header("Authorization", bearer(builder)).header("X-Active-Role", "BUILDER")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(brickSubmission())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sourceChannel").value("BUILDER"))
+                .andExpect(jsonPath("$.status").value("PENDING"));
+    }
+
+    @SafeVarargs
+    private Map<String, Object> brickSubmission(Map.Entry<String, Object>... extra) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("itemName", "Red clay bricks");
+        body.put("itemType", "MATERIAL");
+        body.put("category", "BRICK");
+        body.put("qualityTier", "STANDARD");
+        body.put("city", "Jaipur");
+        body.put("unit", "1000_NOS");
+        body.put("unitPrice", 6800);
+        body.put("observedOn", LocalDate.now().toString());
+        for (var entry : extra) {
+            body.put(entry.getKey(), entry.getValue());
+        }
+        return body;
+    }
+
+    @Test
+    void administratorMayRecordCollectorOutputWhichStaysPendingUntilApproved() throws Exception {
+        var admin = login("platform.admin", "StrongAdmin@2026");
+
+        mvc.perform(post("/api/v1/pricing/submissions")
+                        .header("Authorization", bearer(admin)).header("X-Active-Role", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(brickSubmission(
+                                Map.entry("sourceChannel", "SCRAPER"),
+                                Map.entry("sourceUrl", "https://dir.indiamart.com/jaipur/bricks.html"),
+                                Map.entry("collectorRunId", "indiamart-2026-08-15T09:00:00Z")))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sourceChannel").value("SCRAPER"))
+                .andExpect(jsonPath("$.sourceUrl").value("https://dir.indiamart.com/jaipur/bricks.html"))
+                .andExpect(jsonPath("$.collectorRunId").value("indiamart-2026-08-15T09:00:00Z"))
+                // Collected evidence is never auto-approved; an administrator still has to accept it.
+                .andExpect(jsonPath("$.status").value("PENDING"));
+    }
+
     private JsonNode register(String accountType) throws Exception {
         var suffix = UUID.randomUUID().toString().substring(0, 8);
         var result = mvc.perform(post("/api/v1/auth/register")

@@ -33,6 +33,10 @@ public record PriceSubmissionRequest(
         Boolean transportIncluded,
         @Size(max = 120) String brandName,
         @Size(max = 100) String productCode,
-        @Size(max = 1000) String specification
+        @Size(max = 1000) String specification,
+        /** Defaults to USER. Only a trusted caller may claim a higher-trust channel. */
+        PriceSourceChannel sourceChannel,
+        @Size(max = 1000) String sourceUrl,
+        @Size(max = 80) String collectorRunId
 ) {
 }

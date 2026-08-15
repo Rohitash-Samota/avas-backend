@@ -28,7 +28,7 @@ class ProjectPdfControllerTest {
     void setUp() {
         projects = new ProjectService(new GeometryEngine(), "RJ-JDA-2026.08", "AVAS-KB-2026.08",
                 "layout-heuristic-1.5.0", "planning-estimate-1.2.0");
-        controller = new ProjectController(projects, null, new FloorPlanPdfService());
+        controller = new ProjectController(projects, null, new FloorPlanPdfService(), new PlotDocumentService());
         owner = UUID.randomUUID();
         var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL",
                 owner, "tenant-one");
@@ -52,7 +52,7 @@ class ProjectPdfControllerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(new String(response.getBody(), 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         try (var document = Loader.loadPDF(response.getBody())) {
-            assertThat(document.getNumberOfPages()).isEqualTo(2);
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }

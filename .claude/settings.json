@@ -11,7 +11,13 @@
       "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://[::1]:8090/actuator/health --max-time 5)",
       "Bash(docker rm *)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/actuator/health)",
-      "Bash(curl -s http://localhost:8080/actuator/health)"
+      "Bash(curl -s http://localhost:8080/actuator/health)",
+      "Bash(npm ls *)"
+    ],
+    "additionalDirectories": [
+      "/Users/rohitsamota/Documents/Projects/avas-2/avas-web/shared/api",
+      "/Users/rohitsamota/Documents/Projects/avas-2/avas-web/app/projects/new",
+      "/Users/rohitsamota/Documents/Projects/avas-2/avas-web/features/projects/lib"
     ]
   }
 }

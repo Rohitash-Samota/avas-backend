@@ -25,12 +25,35 @@ public class ProjectController {
     private final ProjectService service;
     private final AuthService auth;
     private final FloorPlanPdfService pdf;
+    private final PlotDocumentService plotDocuments;
 
-    public ProjectController(ProjectService service, AuthService auth, FloorPlanPdfService pdf) {
-        this.service = service; this.auth = auth; this.pdf = pdf;
+    public ProjectController(ProjectService service, AuthService auth, FloorPlanPdfService pdf,
+            PlotDocumentService plotDocuments) {
+        this.service = service; this.auth = auth; this.pdf = pdf; this.plotDocuments = plotDocuments;
     }
 
     public record EstimateGenerateRequest(@NotBlank String drawingId) {}
+
+    /**
+     * Reads an uploaded plot drawing and proposes a boundary.
+     *
+     * <p>Deliberately not project-scoped: the create wizard reads a drawing before the project
+     * exists. Nothing is stored or mutated here. The response is a proposal the customer confirms
+     * or replaces through {@code PUT /basic-details}, so a misread drawing can never silently
+     * become the geometry every downstream artifact is built from.</p>
+     */
+    @PostMapping(value = "/plot-documents/analyse", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    PlotDocumentAnalysis analysePlotDocument(
+            @RequestPart("file") org.springframework.web.multipart.MultipartFile file,
+            @RequestParam(value = "roadFacing", required = false) Facing roadFacing) {
+        try {
+            return plotDocuments.analyse(file.getOriginalFilename(), file.getContentType(),
+                    file.getBytes(), roadFacing);
+        } catch (java.io.IOException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "The plot drawing upload could not be read", exception);
+        }
+    }
 
     @PostMapping("/projects")
     ResponseEntity<ProjectSummary> create(@Valid @RequestBody CreateProjectRequest body, HttpServletRequest request,

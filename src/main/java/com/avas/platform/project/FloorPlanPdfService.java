@@ -44,11 +44,23 @@ public class FloorPlanPdfService {
         try (var document = new PDDocument(); var output = new ByteArrayOutputStream()) {
             setMetadata(document.getDocumentInformation(), project, drawing);
             var floors = floorKeys(drawing);
+            // The site sheet leads the set: a reviewer checks the legal envelope before the plan
+            // that sits inside it. Older drawings carry no outline, so the set stays floors-only.
+            var siteSheet = drawing.geometry().hasSiteContext();
+            var sheetCount = floors.size() + (siteSheet ? 1 : 0);
+            if (siteSheet) {
+                var page = new PDPage(PDRectangle.A4);
+                document.addPage(page);
+                try (var canvas = new PDPageContentStream(document, page)) {
+                    renderSitePlan(canvas, project, drawing, sheetCount);
+                }
+            }
             for (var index = 0; index < floors.size(); index++) {
                 var page = new PDPage(PDRectangle.A4);
                 document.addPage(page);
                 try (var canvas = new PDPageContentStream(document, page)) {
-                    render(canvas, project, drawing, floors.get(index), index + 1, floors.size());
+                    render(canvas, project, drawing, floors.get(index),
+                            index + 1 + (siteSheet ? 1 : 0), sheetCount);
                 }
             }
             document.save(output);
@@ -255,6 +267,7 @@ public class FloorPlanPdfService {
                 geometry.plotLength());
         renderPlanAnnotations(canvas, project, drawing, panelX, panelY, panelWidth, panelHeight,
                 originX, originY, plotWidth, plotHeight, floor, rooms);
+        renderScaleBar(canvas, panelX + 12, panelY + 24, scale);
     }
 
     private void renderRoomLabel(PDPageContentStream canvas, RoomGeometry room,
@@ -518,6 +531,167 @@ public class FloorPlanPdfService {
             case "NORTH", "SOUTH", "EAST", "WEST" -> orientation;
             default -> fallback;
         };
+    }
+
+    /**
+     * Sheet A1: the legal envelope, drawn before any layout that depends on it.
+     *
+     * <p>Shows the surveyed outline, the setback ring and the rectangle rooms are packed into, so a
+     * reviewer can see at a glance how much of the plot the assumption consumed and how much
+     * buildable area the packer left unused.</p>
+     */
+    private void renderSitePlan(PDPageContentStream canvas, ProjectSummary project,
+            DrawingCandidate drawing, int sheetCount) throws IOException {
+        fill(canvas, Color.WHITE, 0, 0, PDRectangle.A4.getWidth(), PDRectangle.A4.getHeight());
+        var geometry = drawing.geometry();
+
+        text(canvas, BOLD, 16, INK, "AVAS", 36, 804);
+        text(canvas, REGULAR, 5.5f, MUTED, "ADAPTIVE HOME PLANNING", 36, 794);
+        textRight(canvas, REGULAR, 6, MUTED, "SERVER-GENERATED FLOOR SET  |  SHEET 1 OF " + sheetCount,
+                559, 802);
+        line(canvas, LINE, .8f, 36, 784, 559, 784);
+        text(canvas, BOLD, 25, INK, "SITE PLAN", 36, 750);
+        text(canvas, BOLD, 6.6f, CORAL, "PLOT "
+                + grouped(Math.round(geometry.plotArea())) + " SQ FT  |  BUILDABLE "
+                + grouped(Math.round(geometry.buildableArea())) + " SQ FT  |  "
+                + geometry.plotOutline().size() + " SURVEYED CORNERS", 36, 735);
+
+        var panelX = 36f;
+        var panelY = 180f;
+        var panelWidth = 523f;
+        var panelHeight = 527f;
+        fill(canvas, Color.WHITE, panelX, panelY, panelWidth, panelHeight);
+        stroke(canvas, LINE, .7f, panelX, panelY, panelWidth, panelHeight);
+
+        var bounds = PlotGeometry.bounds(geometry.plotOutline());
+        var scale = (float) Math.min((panelWidth - 90) / Math.max(bounds.width(), .001),
+                (panelHeight - 120) / Math.max(bounds.length(), .001));
+        var originX = panelX + (panelWidth - (float) bounds.width() * scale) / 2;
+        var originY = panelY + 60 + (panelHeight - 120 - (float) bounds.length() * scale) / 2;
+        // Planning y grows north; PDF y also grows up, so the outline maps without a flip.
+        java.util.function.BiFunction<Double, Double, float[]> project2d = (x, y) -> new float[] {
+                originX + (float) ((x - bounds.minimumX()) * scale),
+                originY + (float) ((y - bounds.minimumY()) * scale)};
+
+        text(canvas, BOLD, 6.2f, CORAL, "LEGAL ENVELOPE", panelX + 12, panelY + panelHeight - 16);
+        text(canvas, BOLD, 10, INK, "PLOT, SETBACKS AND BUILDABLE AREA", panelX + 12,
+                panelY + panelHeight - 29);
+        textRight(canvas, REGULAR, 5.8f, MUTED, "ALL DIMENSIONS IN FEET", panelX + panelWidth - 12,
+                panelY + panelHeight - 16);
+
+        polygon(canvas, geometry.plotOutline(), project2d, new Color(247, 245, 240), WALL, 1.4f);
+        polygon(canvas, geometry.buildableOutline(), project2d, MINT, new Color(125, 154, 110), 1f);
+
+        var footprint = footprintOf(drawing);
+        if (footprint != null) {
+            var corner = project2d.apply(footprint[0], footprint[1]);
+            fill(canvas, new Color(232, 226, 214), corner[0], corner[1],
+                    (float) footprint[2] * scale, (float) footprint[3] * scale);
+            stroke(canvas, CORAL, 1.2f, corner[0], corner[1],
+                    (float) footprint[2] * scale, (float) footprint[3] * scale);
+            textCentered(canvas, BOLD, 6, CORAL, "BUILDING FOOTPRINT",
+                    corner[0] + (float) footprint[2] * scale / 2,
+                    corner[1] + (float) footprint[3] * scale / 2);
+        }
+
+        var setbacks = geometry.setbacks();
+        if (setbacks != null) {
+            text(canvas, REGULAR, 5.4f, MUTED, "Setback front " + oneDecimal(setbacks.front())
+                    + " ft  |  rear " + oneDecimal(setbacks.rear()) + " ft  |  side "
+                    + oneDecimal(setbacks.side()) + " ft  |  source " + setbacks.source(),
+                    panelX + 12, panelY + 44);
+        }
+        renderScaleBar(canvas, panelX + 12, panelY + 24, scale);
+
+        var northX = panelX + panelWidth - 23;
+        var northY = panelY + panelHeight - 63;
+        line(canvas, INK, 1f, northX, northY, northX, northY + 16);
+        line(canvas, INK, 1f, northX, northY + 16, northX - 4, northY + 10);
+        line(canvas, INK, 1f, northX, northY + 16, northX + 4, northY + 10);
+        textCentered(canvas, BOLD, 6, INK, "N", northX, northY - 8);
+
+        renderCompactSummary(canvas, project, drawing, floorKeys(drawing).get(0), 1, sheetCount,
+                36, 105, 523, 62);
+        renderDisclaimer(canvas, project, drawing, floorKeys(drawing).get(0), 1, sheetCount);
+    }
+
+    /** Footprint as {x, y, width, length} recovered from the packed rooms, or null when empty. */
+    private double[] footprintOf(DrawingCandidate drawing) {
+        var rooms = drawing.geometry().rooms();
+        if (rooms.isEmpty()) {
+            return null;
+        }
+        var minX = rooms.stream().mapToDouble(RoomGeometry::x).min().orElse(0);
+        var minY = rooms.stream().mapToDouble(RoomGeometry::y).min().orElse(0);
+        var maxX = rooms.stream().mapToDouble(room -> room.x() + room.width()).max().orElse(0);
+        var maxY = rooms.stream().mapToDouble(room -> room.y() + room.length()).max().orElse(0);
+        return new double[] {minX, minY, maxX - minX, maxY - minY};
+    }
+
+    private void polygon(PDPageContentStream canvas, List<PlotVertex> ring,
+            java.util.function.BiFunction<Double, Double, float[]> project2d,
+            Color fill, Color edge, float weight) throws IOException {
+        if (ring.size() < 3) {
+            return;
+        }
+        canvas.setNonStrokingColor(fill);
+        canvas.setStrokingColor(edge);
+        canvas.setLineWidth(weight);
+        var first = project2d.apply(ring.get(0).x(), ring.get(0).y());
+        canvas.moveTo(first[0], first[1]);
+        for (var index = 1; index < ring.size(); index++) {
+            var point = project2d.apply(ring.get(index).x(), ring.get(index).y());
+            canvas.lineTo(point[0], point[1]);
+        }
+        canvas.closePath();
+        canvas.fillAndStroke();
+    }
+
+    /** Foot increments a reader can actually count off a printed bar. */
+    private static final int[] NICE_STEPS = {1, 2, 5, 10, 20, 25, 50, 100};
+
+    /**
+     * Draws a graduated scale bar plus the stated ratio.
+     *
+     * <p>The plan is fitted to the panel, so its ratio is rarely a round number and a printer that
+     * rescales the sheet invalidates it entirely. The graphic bar is the part that stays true under
+     * rescaling, which is why the drawing carries both rather than a ratio alone.</p>
+     *
+     * @param scale points per foot used to draw the plan
+     */
+    private void renderScaleBar(PDPageContentStream canvas, float x, float y, float scale) throws IOException {
+        var segments = 4;
+        var step = niceStep(110f / (segments * Math.max(scale, .0001f)));
+        var segmentWidth = step * scale;
+        var barHeight = 4.2f;
+        for (var index = 0; index < segments; index++) {
+            var segmentX = x + index * segmentWidth;
+            if (index % 2 == 0) {
+                fill(canvas, INK, segmentX, y, segmentWidth, barHeight);
+            } else {
+                fill(canvas, Color.WHITE, segmentX, y, segmentWidth, barHeight);
+                stroke(canvas, INK, .5f, segmentX, y, segmentWidth, barHeight);
+            }
+        }
+        stroke(canvas, INK, .5f, x, y, segments * segmentWidth, barHeight);
+        for (var index = 0; index <= segments; index += 2) {
+            textCentered(canvas, REGULAR, 4.6f, MUTED, String.valueOf((int) (index * step)),
+                    x + index * segmentWidth, y - 6);
+        }
+        textCentered(canvas, REGULAR, 4.6f, MUTED, "ft",
+                x + segments * segmentWidth + 7, y - 6);
+        // 1 pt is 1/72 in, so a foot drawn at `scale` pt represents 12 in of reality.
+        var ratio = Math.round(864f / Math.max(scale, .0001f));
+        text(canvas, BOLD, 4.9f, MUTED, "SCALE 1:" + ratio + " AT A4", x, y + barHeight + 4);
+    }
+
+    private float niceStep(float raw) {
+        for (var candidate : NICE_STEPS) {
+            if (candidate >= raw) {
+                return candidate;
+            }
+        }
+        return NICE_STEPS[NICE_STEPS.length - 1];
     }
 
     private void renderPlanAnnotations(PDPageContentStream canvas, ProjectSummary project, DrawingCandidate drawing,

@@ -43,8 +43,26 @@ class GeometryEngine {
     List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
             Recommendation recommendation, Map<String, String> versions,
             PlanningParameterSet parameterSet) {
+        var boundary = details.boundary();
+        return generate(projectId, version, details, recommendation, versions, parameterSet,
+                BuildableEnvelope.derive(boundary, SetbackRule.assumedFor(boundary, details.floors()),
+                        details.floors()));
+    }
+
+    /**
+     * Generates candidates against an already-resolved legal envelope.
+     *
+     * <p>The envelope is computed once per project and reused so the recommendation, the geometry
+     * and the estimate all reason about the same buildable footprint.</p>
+     */
+    List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
+            Recommendation recommendation, Map<String, String> versions,
+            PlanningParameterSet parameterSet, BuildableEnvelope envelope) {
         if (details.plotWidth() < 10 || details.plotLength() < 10) {
             throw new IllegalArgumentException("Plot dimensions must each be at least 10 feet");
+        }
+        if (envelope == null) {
+            throw new IllegalArgumentException("A buildable envelope is required before layout generation");
         }
 
         var candidates = new ArrayList<DrawingCandidate>();
@@ -52,7 +70,7 @@ class GeometryEngine {
             var strategy = STRATEGIES.get(index);
             var variant = variantFor(parameterSet, strategy.key());
             var optionParameters = optionParameters(details.parameters(), variant);
-            var rooms = packRooms(details.plotWidth(), details.plotLength(), details.floors(), strategy,
+            var rooms = packRooms(envelope, details.floors(), strategy,
                     recommendation, optionParameters, variant);
             var doors = doorsFor(rooms, details.roadFacing());
             var windows = windowsFor(rooms, doors);
@@ -64,6 +82,7 @@ class GeometryEngine {
                     .mapToDouble(RoomGeometry::area).sum();
             var builtUpArea = (int) Math.round(constructedArea);
             var violations = new ArrayList<>(validate(details.plotWidth(), details.plotLength(), rooms));
+            violations.addAll(validateEnvelope(envelope, rooms));
             violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
             var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea, optionParameters, variant);
             violations.addAll(programmeGaps);
@@ -110,6 +129,16 @@ class GeometryEngine {
             provenance.put("requestedStaircaseType", details.parameters().staircaseType());
             provenance.put("finishTier", details.category().name());
             provenance.put("projectCity", details.city());
+            provenance.put("plotOutlineCorners", String.valueOf(envelope.plot().vertices().size()));
+            provenance.put("plotOutlineIrregular", String.valueOf(envelope.plot().irregular()));
+            provenance.put("plotArea", String.valueOf(Math.round(envelope.plotArea())));
+            provenance.put("buildableArea", String.valueOf(Math.round(envelope.buildableArea())));
+            provenance.put("footprintArea", String.valueOf(Math.round(envelope.footprintArea())));
+            provenance.put("groundCoverage", String.format(Locale.ROOT, "%.3f", envelope.coverageRatio()));
+            provenance.put("setbackFront", String.valueOf(envelope.setbacks().front()));
+            provenance.put("setbackRear", String.valueOf(envelope.setbacks().rear()));
+            provenance.put("setbackSide", String.valueOf(envelope.setbacks().side()));
+            provenance.put("setbackSource", envelope.setbacks().source());
             provenance.put("optimizerSeed", Integer.toUnsignedString(
                     Objects.hash(projectId, version, strategy.key())));
             if (parameterSet != null) {
@@ -160,11 +189,10 @@ class GeometryEngine {
                     strategy.spaceEfficiencyScore(),
                     92 - index,
                     new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms,
-                            doors, windows),
+                            doors, windows, envelope.plot().vertices(), envelope.buildableOutline(),
+                            envelope.setbacks(), envelope.plotArea(), envelope.buildableArea()),
                     List.copyOf(violations),
-                    List.of(
-                            "Verify setbacks against the applicable local authority release.",
-                            "A licensed structural engineer must approve the final grid."),
+                    softRecommendations(envelope),
                     programmeExplanations(strategy, variant, programmeGaps),
                     Map.copyOf(provenance),
                     reviewRequired ? "EXPERT_REVIEW" : "SUCCESS",
@@ -172,6 +200,23 @@ class GeometryEngine {
                     Instant.now()));
         }
         return List.copyOf(candidates);
+    }
+
+    /**
+     * Non-blocking guidance shown beside a candidate, led by anything specific to this plot.
+     *
+     * <p>The two standing professional-scope reminders always close the list so they can never be
+     * pushed out by plot-specific notes.</p>
+     */
+    private List<String> softRecommendations(BuildableEnvelope envelope) {
+        var notes = new ArrayList<String>(envelope.notes());
+        if (envelope.underUsesEnvelope()) {
+            notes.add("An architect can recover additional area by following the plot outline instead of the "
+                    + "largest inscribed rectangle AVAS packs into.");
+        }
+        notes.add("Verify setbacks against the applicable local authority release.");
+        notes.add("A licensed structural engineer must approve the final grid.");
+        return List.copyOf(notes);
     }
 
     private boolean countsAsBuiltUp(RoomGeometry room) {
@@ -340,6 +385,47 @@ class GeometryEngine {
             }
         }
         return List.copyOf(violations);
+    }
+
+    /**
+     * Confirms no room encroaches on required open space.
+     *
+     * <p>The packer is handed a rectangle that already sits inside the setback envelope, so this is
+     * a regression guard rather than an expected failure path. It is checked on every candidate
+     * because a layout that quietly crosses a setback line is the one defect a customer cannot see
+     * in the rendered plan.</p>
+     */
+    List<String> validateEnvelope(BuildableEnvelope envelope, List<RoomGeometry> rooms) {
+        if (envelope == null || envelope.buildableOutline().size() < 3) {
+            return List.of();
+        }
+        var violations = new ArrayList<String>();
+        var outline = envelope.buildableOutline();
+        for (var room : rooms) {
+            if (!countsAsBuiltUp(room)) {
+                // Courtyards, terraces and open parking are allowed to sit in open space.
+                continue;
+            }
+            if (!rectangleInside(outline, room)) {
+                violations.add(room.id() + " crosses the required setback line");
+            }
+        }
+        return List.copyOf(violations);
+    }
+
+    private boolean rectangleInside(List<PlotVertex> outline, RoomGeometry room) {
+        var inset = 0.02d;
+        var left = room.x() + inset;
+        var right = room.x() + room.width() - inset;
+        var bottom = room.y() + inset;
+        var top = room.y() + room.length() - inset;
+        if (right <= left || top <= bottom) {
+            return true;
+        }
+        return PlotGeometry.containsPoint(outline, left, bottom)
+                && PlotGeometry.containsPoint(outline, right, bottom)
+                && PlotGeometry.containsPoint(outline, left, top)
+                && PlotGeometry.containsPoint(outline, right, top);
     }
 
     List<String> validateDocument(int requestedFloors, List<RoomGeometry> rooms,
@@ -670,13 +756,13 @@ class GeometryEngine {
         }
     }
 
-    private List<RoomGeometry> packRooms(double width, double length, int floorCount, Strategy strategy,
+    private List<RoomGeometry> packRooms(BuildableEnvelope envelope, int floorCount, Strategy strategy,
             Recommendation recommendation, HomeParameters parameters, PlanningParameterVariant variant) {
         var rooms = new ArrayList<RoomGeometry>();
         var bedroomAllocation = bedroomAllocation(recommendation.bedrooms(), floorCount);
         var liftRequired = floorCount > 1 && !"NONE".equals(parameters.liftProvision());
         for (var floorIndex = 0; floorIndex < floorCount; floorIndex++) {
-            rooms.addAll(packFloor(width, length, strategy, floorIndex, floorCount,
+            rooms.addAll(packFloor(envelope, strategy, floorIndex, floorCount,
                     bedroomAllocation.get(floorIndex),
                     recommendation.seniorCitizenBedroom(), liftRequired, parameters, variant));
         }
@@ -699,61 +785,76 @@ class GeometryEngine {
         return List.copyOf(result);
     }
 
-    private List<RoomGeometry> packFloor(double width, double length, Strategy strategy, int floorIndex,
+    private List<RoomGeometry> packFloor(BuildableEnvelope envelope, Strategy strategy, int floorIndex,
             int floorCount, int bedroomCount, boolean seniorBedroomRequired, boolean liftRequired,
             HomeParameters parameters, PlanningParameterVariant variant) {
-        var innerWidth = width * .82;
-        var innerLength = length * .76;
-        var startX = width * .09;
-        var startY = length * .12;
+        // The building fills the setback-derived footprint exactly. Required open space is already
+        // subtracted by the envelope, so no second percentage margin may be applied here.
+        var innerWidth = envelope.footprintWidth();
+        var innerLength = envelope.footprintLength();
+        var startX = envelope.footprintX();
+        var startY = envelope.footprintY();
         // Keep the structural envelope and stair stack aligned, but vary the internal grid so each
         // storey is genuine floor-specific geometry rather than a renamed ground-floor copy.
         var baseLeftWidth = innerWidth * strategy.columnSplit();
         var baseRightWidth = innerWidth - baseLeftWidth;
         var baseTopLength = innerLength * strategy.rowSplit();
         var baseBottomLength = innerLength - baseTopLength;
+        // One shared, pre-snapped grid for every storey. The stair and lift stack must be
+        // bit-identical floor to floor, so the core lines are computed once here instead of being
+        // re-derived per floor from expressions that only happen to agree.
+        var grid = new FloorGrid(
+                round2(startX),
+                round2(startX + baseLeftWidth),
+                round2(startX + baseLeftWidth + baseRightWidth * .52),
+                round2(startX + baseLeftWidth + baseRightWidth * .38),
+                round2(startX + baseLeftWidth + baseRightWidth * .62),
+                round2(startX + innerWidth),
+                round2(startY),
+                round2(startY + baseTopLength),
+                round2(startY + baseTopLength + baseBottomLength * .58),
+                round2(startY + innerLength));
         if (floorIndex == 0) {
-            return packGroundFloor(startX, startY, baseLeftWidth, baseRightWidth,
+            return packGroundFloor(grid, baseLeftWidth, baseRightWidth,
                     baseTopLength, baseBottomLength,
                     bedroomCount, seniorBedroomRequired, floorCount > 1, liftRequired, parameters, variant);
         }
         var columnAdjustment = floorIndex == 1 ? .04 : -.03;
         var rowAdjustment = floorIndex == 1 ? -.03 : .03;
-        var topLeftWidth = innerWidth * (strategy.columnSplit() + columnAdjustment);
-        var topRightWidth = innerWidth - topLeftWidth;
-        var topLength = innerLength * (strategy.rowSplit() + rowAdjustment);
-        var middleY = startY + topLength;
-        var buildingBottom = startY + innerLength;
-        var coreX = startX + baseLeftWidth;
-        var coreY = startY + baseTopLength + baseBottomLength * .58;
-        var coreWidth = baseRightWidth * .38;
-        var coreLength = baseBottomLength * .42;
-        var middleLength = coreY - middleY;
+        // Upper storeys vary only their own top-row split, so each floor is genuine floor-specific
+        // geometry while the structural core stays aligned.
+        var topRowSplit = round2(startX + innerWidth * (strategy.columnSplit() + columnAdjustment));
+        var middleY = round2(startY + innerLength * (strategy.rowSplit() + rowAdjustment));
         var types = roomProgram(floorIndex, bedroomCount);
 
         var rooms = new ArrayList<RoomGeometry>();
-        rooms.add(room(floorIndex, 1, types.get(0), startX, startY, topLeftWidth, topLength));
-        rooms.add(room(floorIndex, 2, types.get(1), startX + topLeftWidth, startY, topRightWidth, topLength));
-        rooms.add(room(floorIndex, 3, types.get(2), startX, middleY,
-                baseLeftWidth, buildingBottom - middleY));
-        rooms.add(room(floorIndex, 4, types.get(3), coreX, middleY,
-                baseRightWidth * .52, middleLength));
-        rooms.add(room(floorIndex, 5, types.get(4), coreX + baseRightWidth * .52,
-                middleY, baseRightWidth * .48, middleLength));
-        addVerticalCore(rooms, floorIndex, 6, coreX, coreY, coreWidth, coreLength, liftRequired);
+        rooms.add(room(floorIndex, 1, types.get(0), grid.leftLine(), grid.topLine(),
+                topRowSplit - grid.leftLine(), middleY - grid.topLine()));
+        rooms.add(room(floorIndex, 2, types.get(1), topRowSplit, grid.topLine(),
+                grid.rightLine() - topRowSplit, middleY - grid.topLine()));
+        rooms.add(room(floorIndex, 3, types.get(2), grid.leftLine(), middleY,
+                grid.coreX() - grid.leftLine(), grid.buildingBottom() - middleY));
+        rooms.add(room(floorIndex, 4, types.get(3), grid.coreX(), middleY,
+                grid.middleSplit() - grid.coreX(), grid.coreTop() - middleY));
+        rooms.add(room(floorIndex, 5, types.get(4), grid.middleSplit(), middleY,
+                grid.rightLine() - grid.middleSplit(), grid.coreTop() - middleY));
+        addVerticalCore(rooms, floorIndex, 6, grid.coreX(), grid.coreTop(), grid.coreWidth(),
+                grid.coreLength(), liftRequired);
         var nextIndex = liftRequired ? 8 : 7;
-        rooms.add(room(floorIndex, nextIndex++, types.get(6), coreX + coreWidth,
-                coreY, baseRightWidth * .24, coreLength));
+        rooms.add(room(floorIndex, nextIndex++, types.get(6), grid.coreMidLine(),
+                grid.coreTop(), grid.coreOuterLine() - grid.coreMidLine(), grid.coreLength()));
         addOutdoorOrUtilityZones(rooms, floorIndex, floorCount, nextIndex,
-                coreX + baseRightWidth * .62, coreY, baseRightWidth * .38, coreLength,
-                types.get(7), parameters);
+                grid.coreOuterLine(), grid.coreTop(), grid.rightLine() - grid.coreOuterLine(),
+                grid.coreLength(), types.get(7), parameters);
         return List.copyOf(rooms);
     }
 
-    private List<RoomGeometry> packGroundFloor(double startX, double startY, double leftWidth,
+    private List<RoomGeometry> packGroundFloor(FloorGrid grid, double leftWidth,
             double rightWidth, double topLength, double bottomLength, int bedroomCount,
             boolean seniorBedroomRequired, boolean stairRequired, boolean liftRequired, HomeParameters parameters,
             PlanningParameterVariant variant) {
+        var startX = grid.leftLine();
+        var startY = grid.topLine();
         var rooms = new ArrayList<RoomGeometry>();
         var roomIndex = 1;
         var parkingType = parameters.courtyardRequired()
@@ -768,53 +869,52 @@ class GeometryEngine {
             var desiredWidth = Math.max(leftWidth, parameters.parkingCars() * 8d);
             parkingWidth = round2(Math.min(desiredWidth, Math.max(leftWidth, totalWidth - 8d)));
         }
-        rooms.add(room(0, roomIndex++, parkingType, startX, startY, parkingWidth, topLength));
+        var topRowLength = grid.topRowBottom() - startY;
+        var topRightX = round2(startX + parkingWidth);
+        rooms.add(room(0, roomIndex++, parkingType, startX, startY, topRightX - startX, topRowLength));
 
-        var rightX = startX + leftWidth;
-        var topRightX = startX + parkingWidth;
-        var topRightWidth = round2(totalWidth - parkingWidth);
         if (bedroomCount >= 3) {
-            var livingWidth = topRightWidth * .55;
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY, livingWidth, topLength));
-            rooms.add(room(0, roomIndex++, "BEDROOM", topRightX + livingWidth, startY,
-                    topRightWidth - livingWidth, topLength));
+            var livingSplit = round2(topRightX + (grid.rightLine() - topRightX) * .55);
+            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY,
+                    livingSplit - topRightX, topRowLength));
+            rooms.add(room(0, roomIndex++, "BEDROOM", livingSplit, startY,
+                    grid.rightLine() - livingSplit, topRowLength));
         } else {
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY, topRightWidth, topLength));
+            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY,
+                    grid.rightLine() - topRightX, topRowLength));
         }
 
         var primaryType = seniorBedroomRequired ? "SENIOR_BEDROOM" : "MASTER_BEDROOM";
         if (bedroomCount >= 2) {
-            var primaryY = round2(startY + topLength);
             var primaryLength = round2(bottomLength * .54);
-            var secondaryY = round2(primaryY + primaryLength);
-            var bottomEnd = round2(startY + topLength + bottomLength);
-            rooms.add(room(0, roomIndex++, primaryType, startX, primaryY,
-                    leftWidth, primaryLength));
+            var secondaryY = round2(grid.topRowBottom() + primaryLength);
+            rooms.add(room(0, roomIndex++, primaryType, startX, grid.topRowBottom(),
+                    grid.coreX() - startX, primaryLength));
             rooms.add(room(0, roomIndex++, "BEDROOM", startX, secondaryY,
-                    leftWidth, round2(bottomEnd - secondaryY)));
+                    grid.coreX() - startX, grid.buildingBottom() - secondaryY));
         } else {
-            rooms.add(room(0, roomIndex++, primaryType, startX, startY + topLength, leftWidth, bottomLength));
+            rooms.add(room(0, roomIndex++, primaryType, startX, grid.topRowBottom(),
+                    grid.coreX() - startX, grid.buildingBottom() - grid.topRowBottom()));
         }
 
-        rooms.add(room(0, roomIndex++, bedroomCount >= 5 ? "BEDROOM" : "DINING", rightX,
-                startY + topLength, rightWidth * .52, bottomLength * .58));
-        rooms.add(room(0, roomIndex++, "KITCHEN", rightX + rightWidth * .52,
-                startY + topLength, rightWidth * .48, bottomLength * .58));
-        var coreX = rightX;
-        var coreY = startY + topLength + bottomLength * .58;
-        var coreWidth = rightWidth * .38;
-        var coreLength = bottomLength * .42;
+        rooms.add(room(0, roomIndex++, bedroomCount >= 5 ? "BEDROOM" : "DINING", grid.coreX(),
+                grid.topRowBottom(), grid.middleSplit() - grid.coreX(),
+                grid.coreTop() - grid.topRowBottom()));
+        rooms.add(room(0, roomIndex++, "KITCHEN", grid.middleSplit(), grid.topRowBottom(),
+                grid.rightLine() - grid.middleSplit(), grid.coreTop() - grid.topRowBottom()));
         if (stairRequired) {
-            addVerticalCore(rooms, 0, roomIndex, coreX, coreY, coreWidth, coreLength, liftRequired);
+            addVerticalCore(rooms, 0, roomIndex, grid.coreX(), grid.coreTop(), grid.coreWidth(),
+                    grid.coreLength(), liftRequired);
             roomIndex += liftRequired ? 2 : 1;
         } else {
-            rooms.add(room(0, roomIndex++, "STORE", coreX, coreY, coreWidth, coreLength));
+            rooms.add(room(0, roomIndex++, "STORE", grid.coreX(), grid.coreTop(), grid.coreWidth(),
+                    grid.coreLength()));
         }
-        rooms.add(room(0, roomIndex++, "BATHROOM", rightX + rightWidth * .38,
-                startY + topLength + bottomLength * .58, rightWidth * .24, bottomLength * .42));
+        rooms.add(room(0, roomIndex++, "BATHROOM", grid.coreMidLine(), grid.coreTop(),
+                grid.coreOuterLine() - grid.coreMidLine(), grid.coreLength()));
         rooms.add(room(0, roomIndex, bedroomCount >= 4 ? "BEDROOM" : "UTILITY",
-                rightX + rightWidth * .62, startY + topLength + bottomLength * .58,
-                rightWidth * .38, bottomLength * .42));
+                grid.coreOuterLine(), grid.coreTop(),
+                grid.rightLine() - grid.coreOuterLine(), grid.coreLength()));
         return List.copyOf(rooms);
     }
 
@@ -884,8 +984,19 @@ class GeometryEngine {
     private RoomGeometry room(int floorIndex, int roomIndex, String type,
             double x, double y, double width, double length) {
         var floor = floorName(floorIndex);
+        // Both corners are snapped to the same 2-decimal grid, and the extents are derived from the
+        // snapped corners. Rounding x and width independently lets a shared wall drift by up to a
+        // hundredth in each direction, which is the same order as the overlap tolerance, so two
+        // rooms meeting on an exact line could be reported as overlapping. Snapping the far corner
+        // instead makes an abutting pair share one identical coordinate.
+        var left = round2(x);
+        var bottom = round2(y);
+        var right = round2(x + width);
+        var top = round2(y + length);
+        var snappedWidth = right - left;
+        var snappedLength = top - bottom;
         return new RoomGeometry(floorPrefix(floorIndex) + "-R" + roomIndex, type,
-                round2(x), round2(y), round2(width), round2(length), round2(width * length), floor);
+                left, bottom, snappedWidth, snappedLength, round2(snappedWidth * snappedLength), floor);
     }
 
     private String floorName(int floorIndex) {
@@ -1127,6 +1238,35 @@ class GeometryEngine {
 
     private double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    /**
+     * Pre-snapped structural grid lines shared by every storey of one candidate.
+     *
+     * <p>All coordinates are already on the two-decimal grid that {@link RoomGeometry} records use,
+     * so a span derived as the difference of two lines needs no further rounding and adjacent rooms
+     * meet exactly. Deriving the core from this one grid is what keeps the stair and lift stack
+     * identical from floor to floor.</p>
+     */
+    private record FloorGrid(
+            double leftLine,
+            double coreX,
+            double middleSplit,
+            double coreMidLine,
+            double coreOuterLine,
+            double rightLine,
+            double topLine,
+            double topRowBottom,
+            double coreTop,
+            double buildingBottom
+    ) {
+        double coreWidth() {
+            return coreMidLine - coreX;
+        }
+
+        double coreLength() {
+            return buildingBottom - coreTop;
+        }
     }
 
     private record Strategy(String key, String name, double columnSplit, double rowSplit,

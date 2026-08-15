@@ -14,6 +14,14 @@ final class ProjectAggregate {
     String status = "DRAFT";
     int snapshotVersion = 0;
     BasicDetailsRequest details;
+    /**
+     * Legal envelope for the current details, resolved once and reused.
+     *
+     * <p>The recommendation, the geometry engine and the estimate must all reason about the same
+     * buildable footprint, otherwise a plan is flagged against a target it was never given.
+     * Rebuilt lazily after a reload because it is derived state, not stored state.</p>
+     */
+    private BuildableEnvelope envelope;
     Recommendation recommendation;
     RequirementSummary requirementSummary;
     final List<DrawingCandidate> drawings = new ArrayList<>();
@@ -44,5 +52,27 @@ final class ProjectAggregate {
 
     ProjectSummary summary() {
         return new ProjectSummary(id, code, name, startMode, status, snapshotVersion, details, createdAt, updatedAt);
+    }
+
+    /**
+     * Buildable envelope for the current details.
+     *
+     * @throws IllegalArgumentException when the outline and setbacks leave nothing to build on
+     */
+    BuildableEnvelope envelope() {
+        if (details == null) {
+            throw new IllegalStateException("Basic details are required before the envelope can be resolved");
+        }
+        if (envelope == null) {
+            var boundary = details.boundary();
+            envelope = BuildableEnvelope.derive(boundary,
+                    SetbackRule.assumedFor(boundary, details.floors()), details.floors());
+        }
+        return envelope;
+    }
+
+    /** Drops the cached envelope after any change that can move the buildable footprint. */
+    void invalidateEnvelope() {
+        envelope = null;
     }
 }

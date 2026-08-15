@@ -38,7 +38,7 @@ class FloorPlanPdfServiceTest {
         assertThat(new String(bytes, 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         assertThat(bytes.length).isGreaterThan(4_000);
         try (var document = Loader.loadPDF(bytes)) {
-            assertThat(document.getNumberOfPages()).isEqualTo(2);
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }
@@ -52,8 +52,9 @@ class FloorPlanPdfServiceTest {
                     .contains("2-FLOOR COMPLETE SET")
                     .contains("Ground Floor geometry")
                     .contains("First Floor geometry")
-                    .contains("SHEET 1 / 2")
-                    .contains("SHEET 2 / 2")
+                    .contains("SITE PLAN")
+                    .contains("SHEET 2 / 3")
+                    .contains("SHEET 3 / 3")
                     .contains("Living Room")
                     .contains("Family Lounge")
                     .contains("ALL DIMENSIONS IN FEET")
@@ -83,12 +84,12 @@ class FloorPlanPdfServiceTest {
 
             try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()),
                     projects.drawings(project.id()).getFirst()))) {
-                assertThat(document.getNumberOfPages()).isEqualTo(floors);
+                assertThat(document.getNumberOfPages()).isEqualTo(floors + 1);
                 for (var page : document.getPages()) {
                     assertThat(page.getResources().getXObjectNames()).isEmpty();
                 }
                 var text = new PDFTextStripper().getText(document);
-                assertThat(text).contains("SHEET " + floors + " / " + floors);
+                assertThat(text).contains("SHEET " + (floors + 1) + " / " + (floors + 1));
                 if (floors == 3) assertThat(text).contains("SECOND FLOOR PLAN");
             }
         }
@@ -154,7 +155,7 @@ class FloorPlanPdfServiceTest {
         var bytes = pdf.generate(projects.get(project.id()), drawing);
 
         try (var document = Loader.loadPDF(bytes)) {
-            assertThat(document.getNumberOfPages()).isEqualTo(2);
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }
@@ -176,7 +177,7 @@ class FloorPlanPdfServiceTest {
         projects.updateBasicDetails(project.id(), details(50, 70, Facing.EAST, 3), "INDIVIDUAL");
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), historical))) {
-            assertThat(document.getNumberOfPages()).isEqualTo(2);
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
             var text = new PDFTextStripper().getText(document);
             assertThat(text)
                     .contains("2-FLOOR COMPLETE SET")
@@ -200,11 +201,49 @@ class FloorPlanPdfServiceTest {
         var malformed = floorsOnly(projects.drawings(project.id()).getFirst(), List.of("FIRST", "SECOND"), 2);
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), malformed))) {
+            // Rebuilt without site context, so the set is floor sheets only and carries no site plan.
             assertThat(document.getNumberOfPages()).isEqualTo(2);
             assertThat(new PDFTextStripper().getText(document))
                     .contains("LEGACY INCOMPLETE FLOOR SET")
                     .contains("REGENERATE REQUIRED")
                     .doesNotContain("2-FLOOR COMPLETE SET");
+        }
+    }
+
+    @Test
+    void leadsTheSetWithASiteSheetCarryingTheSetbackBasisAndAGraphicScale() throws Exception {
+        var project = projects.create(new CreateProjectRequest("Irregular plot", StartMode.PLOT), "INDIVIDUAL");
+        var base = details(Facing.NORTH, 2);
+        // An L-shaped survey: the site sheet is the only place a reviewer sees the real outline.
+        var boundary = new PlotBoundary(List.of(
+                PlotVertex.of(0, 0), PlotVertex.of(60, 0), PlotVertex.of(60, 30),
+                PlotVertex.of(36, 30), PlotVertex.of(36, 72), PlotVertex.of(0, 72)), Facing.NORTH);
+        projects.updateBasicDetails(project.id(), new BasicDetailsRequest(base.plotWidth(), base.plotLength(),
+                base.roadFacing(), base.city(), base.floors(), base.budget(), base.category(), base.family(),
+                base.preferences(), base.parameters(), boundary), "INDIVIDUAL");
+        var recommendation = projects.generateRecommendation(project.id(), "INDIVIDUAL");
+        projects.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        projects.generateDrawings(project.id(), "INDIVIDUAL");
+        var drawing = projects.drawings(project.id()).getFirst();
+
+        try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), drawing))) {
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            var text = new PDFTextStripper().getText(document);
+            assertThat(text)
+                    .contains("SITE PLAN")
+                    .contains("LEGAL ENVELOPE")
+                    .contains("PLOT, SETBACKS AND BUILDABLE AREA")
+                    .contains("BUILDING FOOTPRINT")
+                    .contains("SURVEYED CORNERS")
+                    .contains("Setback front")
+                    .contains("AVAS_PLANNING_ASSUMPTION")
+                    // The ratio is only valid at A4, so the bar is what survives a rescaled print.
+                    .contains("SCALE 1:")
+                    .contains("AT A4");
+            // Vector only: a raster fallback would defeat the whole point of a scaled drawing.
+            for (var page : document.getPages()) {
+                assertThat(page.getResources().getXObjectNames()).isEmpty();
+            }
         }
     }
 

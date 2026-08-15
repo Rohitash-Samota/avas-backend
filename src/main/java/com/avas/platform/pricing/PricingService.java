@@ -55,10 +55,38 @@ public class PricingService implements CostRateProvider {
         if (!configuration().contributionsEnabled()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Price contributions are currently disabled by the administrator");
         }
-        var value = submissions.save(new PriceSubmissionEntity(tenantId, userId, activeRole, request));
+        var value = submissions.save(new PriceSubmissionEntity(tenantId, userId,
+                activeRole, authorisedChannel(request.sourceChannel(), activeRole), request));
         record("PRICE_SUBMITTED", "PRICE_SUBMISSION", value.id().toString(), userId, activeRole,
-                "Submitted " + value.itemName() + " pricing evidence for " + value.city());
+                "Submitted " + value.itemName() + " pricing evidence for " + value.city()
+                        + " via " + value.sourceChannel());
         return PriceSubmissionResponse.from(value);
+    }
+
+    /**
+     * Decides which provenance channel a caller is allowed to claim.
+     *
+     * <p>The channel drives how much weight the evidence carries, so it cannot be self-asserted by
+     * whoever posts the request. An ordinary submission is USER regardless of what the body says;
+     * only an administrator may record collector output or an official schedule, which is how the
+     * scraper's PENDING rows get their channel without letting an arbitrary caller mint OFFICIAL
+     * evidence.</p>
+     */
+    private PriceSourceChannel authorisedChannel(PriceSourceChannel requested, String activeRole) {
+        if (requested == null) {
+            return "BUILDER".equals(activeRole) ? PriceSourceChannel.BUILDER : PriceSourceChannel.USER;
+        }
+        if ("ADMIN".equals(activeRole)) {
+            return requested;
+        }
+        if ("BUILDER".equals(activeRole) && requested == PriceSourceChannel.BUILDER) {
+            return PriceSourceChannel.BUILDER;
+        }
+        if (requested == PriceSourceChannel.USER) {
+            return PriceSourceChannel.USER;
+        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Only an administrator may record " + requested + " price evidence");
     }
 
     @Transactional(readOnly = true)
@@ -165,13 +193,23 @@ public class PricingService implements CostRateProvider {
         var baseSource = baseEvidence.isEmpty() ? "AVAS_ADMIN_BASE_PRICE" : "APPROVED_LOCAL_EVIDENCE";
         var resolved = new ArrayList<CostRateEvidence>();
         for (var requirement : query.requirements()) {
-            var matches = approved.stream()
+            var candidates = approved.stream()
                     .filter(value -> value.itemType() == requirement.itemType())
                     .filter(value -> canonicalKey(value.category()).equals(canonicalKey(requirement.category())))
                     .filter(value -> canonicalKey(value.unit()).equals(canonicalKey(requirement.unit())))
+                    .toList();
+            if (candidates.isEmpty()) continue;
+            // Only the most trustworthy channel present is priced from. Market observation informs
+            // a rate when nothing better exists, but it never dilutes accountable evidence by being
+            // averaged in alongside it.
+            var bestChannel = candidates.stream()
+                    .map(PriceSubmissionEntity::sourceChannel)
+                    .max(Comparator.comparingInt(PriceSourceChannel::trust))
+                    .orElse(PriceSourceChannel.USER);
+            var matches = candidates.stream()
+                    .filter(value -> value.sourceChannel() == bestChannel)
                     .sorted(Comparator.comparing(PriceSubmissionEntity::unitPrice))
                     .toList();
-            if (matches.isEmpty()) continue;
             // Freeze one real observation so the evidence ID, brand/product and rate always refer
             // to the same approved record. Sample count still communicates the supporting pool.
             var representative = matches.get((matches.size() - 1) / 2);
