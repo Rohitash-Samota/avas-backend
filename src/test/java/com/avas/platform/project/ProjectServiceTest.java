@@ -17,12 +17,12 @@ class ProjectServiceTest {
     }
 
     @Test
-    void recommendsSeniorFriendlyFourBedroomPremiumHome() {
+    void sharesRoomsTwoToAFamilyMemberAndKeepsTheSeniorOnTheGroundFloor() {
         var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
         service.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
         var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
 
-        assertThat(recommendation.bedrooms()).isEqualTo(4);
+        assertThat(recommendation.bedrooms()).isEqualTo(3);
         assertThat(recommendation.category()).isEqualTo("PREMIUM");
         assertThat(recommendation.seniorCitizenBedroom()).isTrue();
         assertThat(recommendation.confidence()).isEqualTo(92);
@@ -41,7 +41,7 @@ class ProjectServiceTest {
 
         assertThat(recommendation.bedrooms()).isEqualTo(3);
         assertThat(recommendation.reasons())
-                .anyMatch(reason -> reason.contains("6 permanent family members require 3 core bedrooms"))
+                .anyMatch(reason -> reason.contains("6 permanent family members share 3 core bedrooms at two per room"))
                 .anyMatch(reason -> reason.contains("preferred flex/guest room"));
         assertThat(recommendation.provenance())
                 .containsEntry("method", "deterministic-recommendation-1.2");
@@ -110,6 +110,28 @@ class ProjectServiceTest {
         assertThat(drawings.get(1).hardViolations())
                 .noneMatch(value -> value.startsWith("Programme gap: placed built-up area"));
         assertThat(service.get(project.id()).status()).isEqualTo("REVIEW_REQUIRED");
+    }
+
+    @Test
+    void regenerationSupersedesTheConceptSetInsteadOfGrowingIt() {
+        var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        service.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
+        service.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        service.generateDrawings(project.id(), "INDIVIDUAL");
+        var first = service.currentDrawings(project.id());
+
+        service.regenerate(first.getFirst().id(), "INDIVIDUAL");
+        var second = service.currentDrawings(project.id());
+
+        assertThat(second).hasSize(3);
+        assertThat(second).extracting(DrawingCandidate::version).containsOnly(first.getFirst().version() + 1);
+        assertThat(second).extracting(DrawingCandidate::id)
+                .doesNotContainAnyElementsOf(first.stream().map(DrawingCandidate::id).toList());
+        // The superseded set stays stored and individually addressable, so an approval or estimate
+        // recorded against it keeps resolving after the customer regenerates.
+        assertThat(service.drawings(project.id())).hasSize(6);
+        assertThat(service.drawing(first.getFirst().id()).id()).isEqualTo(first.getFirst().id());
     }
 
     @Test

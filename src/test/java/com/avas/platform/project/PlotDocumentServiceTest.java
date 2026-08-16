@@ -74,7 +74,76 @@ class PlotDocumentServiceTest {
 
         assertThat(analysis.proposedBoundary()).isNull();
         assertThat(analysis.requiresConfirmation()).isTrue();
-        assertThat(analysis.notes()).anyMatch(note -> note.contains("cannot measure them automatically"));
+        assertThat(analysis.source()).isEqualTo(PlotDocumentAnalysis.Source.NONE);
+        assertThat(analysis.notes()).anyMatch(note -> note.contains("cannot measure them from text alone"));
+    }
+
+    @Test
+    void readsAScanThroughTheOutlineReaderAndRecordsThatItWasRead() {
+        var reader = stubReader(new PlotOutlineClient.PlotOutlineSuggestion(
+                PlotBoundary.rectangle(30, 50, Facing.NORTH), "RECTANGLE", 78,
+                List.of(60d, 30d), List.of("Read the dimension line on the south edge"),
+                "OPENAI", "vision-model-1", false, List.of()));
+        var png = new byte[] {(byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10};
+
+        var analysis = new PlotDocumentService(reader).analyse("naksha.png", "image/png", png,
+                Facing.NORTH, "tenant-one");
+
+        assertThat(analysis.proposedBoundary()).isNotNull();
+        assertThat(analysis.proposedBoundary().area()).isCloseTo(1_500d, org.assertj.core.data.Offset.offset(1d));
+        assertThat(analysis.confidence()).isEqualTo(78);
+        assertThat(analysis.source()).isEqualTo(PlotDocumentAnalysis.Source.AVAS_AI);
+        assertThat(analysis.model()).isEqualTo("vision-model-1");
+        assertThat(analysis.notes()).anyMatch(note -> note.contains("read from the drawing itself"));
+    }
+
+    @Test
+    void keepsTheMeasuredTextReadingWhenTheReaderIsNoMoreCertain() throws Exception {
+        var reader = stubReader(new PlotOutlineClient.PlotOutlineSuggestion(
+                PlotBoundary.rectangle(99, 99, Facing.NORTH), "RECTANGLE", 55, List.of(),
+                List.of("Low confidence reading"), "OPENAI", "vision-model-1", false, List.of()));
+        var pdf = pdfContaining("NORTH SIDE 40'-0\"", "EAST SIDE 60'-0\"");
+
+        var analysis = new PlotDocumentService(reader).analyse("survey.pdf", "application/pdf", pdf,
+                Facing.NORTH, "tenant-one");
+
+        assertThat(analysis.source()).isEqualTo(PlotDocumentAnalysis.Source.DIMENSION_TEXT);
+        assertThat(analysis.proposedBoundary().area()).isCloseTo(2_400d, org.assertj.core.data.Offset.offset(1d));
+        assertThat(analysis.notes()).anyMatch(note -> note.contains("Low confidence reading"));
+    }
+
+    @Test
+    void describingAPlotNeedsBothADescriptionAndAConfiguredReader() {
+        assertThatThrownBy(() -> service.describe("30 x 50 plot", Facing.NORTH, null, null, "tenant-one"))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("not configured");
+
+        var reader = stubReader(new PlotOutlineClient.PlotOutlineSuggestion(
+                PlotBoundary.rectangle(30, 50, Facing.WEST), "RECTANGLE", 60, List.of(),
+                List.of("Drawn from the description"), "DETERMINISTIC", "avas-outline-rules-1.0.0",
+                false, List.of()));
+        assertThatThrownBy(() -> new PlotDocumentService(reader).describe("  ", Facing.NORTH, null, null, null))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Describe the plot");
+
+        var suggestion = new PlotDocumentService(reader)
+                .describe("30 x 50 west facing", Facing.WEST, null, null, "tenant-one");
+        assertThat(suggestion.hasBoundary()).isTrue();
+        assertThat(suggestion.boundary().roadFacing()).isEqualTo(Facing.WEST);
+    }
+
+    private PlotOutlineClient stubReader(PlotOutlineClient.PlotOutlineSuggestion suggestion) {
+        return new PlotOutlineClient() {
+            @Override
+            public boolean enabled() {
+                return true;
+            }
+
+            @Override
+            public PlotOutlineSuggestion propose(PlotOutlineQuery query) {
+                return suggestion;
+            }
+        };
     }
 
     @Test

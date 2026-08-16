@@ -264,7 +264,26 @@ public class ProjectService {
         return required(projectId).jobs.stream().filter(job -> job.id().equals(jobId)).findFirst().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Drawing job not found"));
     }
 
+    /** Every candidate ever generated, newest last. Callers that pin a historical version need this. */
     public List<DrawingCandidate> drawings(String projectId) { return List.copyOf(required(projectId).drawings); }
+
+    /**
+     * The concept set a customer is currently choosing between: the newest generation only.
+     *
+     * <p>Regeneration supersedes a set rather than adding to it. Every generation stamps the same
+     * version onto all of its candidates, so the newest version is exactly the three strategies that
+     * were last generated, and a project can never accumulate six or nine cards to compare.</p>
+     *
+     * <p>Superseded candidates stay stored and remain addressable through {@link #drawing(String)},
+     * which is what keeps an approval, an estimate and an audit entry resolvable against the exact
+     * drawing that was on screen when the decision was recorded.</p>
+     */
+    public List<DrawingCandidate> currentDrawings(String projectId) {
+        var all = required(projectId).drawings;
+        var current = all.stream().mapToInt(DrawingCandidate::version).max().orElse(0);
+        return all.stream().filter(drawing -> drawing.version() == current).toList();
+    }
+
     public DrawingCandidate drawing(String drawingId) { return findDrawing(drawingId).drawing; }
 
     public synchronized RevisionReceipt feedback(String drawingId, FeedbackRequest request, String role) {
@@ -422,11 +441,16 @@ public class ProjectService {
     private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
         var d = project.details;
         var members = d.family().members();
-        // Couple-sharing adult rooms, one room per child, and one senior room per two seniors.
+        // Two to a room across the whole household: couples share, children share, and seniors share.
+        // Giving every child a room of their own was inflating a four-child family to six bedrooms
+        // and pushing the built-up target past what the plot and the budget could carry, which is
+        // how a brief ends up with more bathrooms than the drawing can place. Sharing is also what
+        // these households actually do; a family who wants a room per child raises the child count's
+        // effect by asking for more bedrooms in their priorities.
         // A regular guest room remains a preferred flex space rather than inflating the permanent
         // household count. The six-room ceiling is the current low-rise geometry-engine limit.
         var adultBedrooms = (d.family().adults() + 1) / 2;
-        var childBedrooms = d.family().children();
+        var childBedrooms = (d.family().children() + 1) / 2;
         var seniorBedrooms = (d.family().seniorCitizens() + 1) / 2;
         var bedrooms = Math.max(2, Math.min(6, adultBedrooms + childBedrooms + seniorBedrooms));
         var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
@@ -440,7 +464,7 @@ public class ProjectService {
         var guestReason = d.family().regularGuests()
                 ? "A preferred flex/guest room is included without changing the permanent bedroom count"
                 : "No separate regular-guest room was requested";
-        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .92), round10(builtUp * 1.08), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members require " + bedrooms + " core bedrooms", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", guestReason, category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .92), round10(builtUp * 1.08), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members share " + bedrooms + " core bedrooms at two per room", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", guestReason, category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
     }
 
     private RequirementSummary requirementFor(ProjectAggregate project) {

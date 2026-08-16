@@ -17,6 +17,19 @@ import java.util.Objects;
  */
 @Component
 class GeometryEngine {
+    /**
+     * Current geometry document schema.
+     *
+     * <p>{@code multi-floor-2} corrected the opening compass convention: north is the maximum y of
+     * the planning grid, matching {@link PlotBoundary} and the setback envelope. Documents still
+     * stamped {@code multi-floor-1} carry openings mirrored north to south and must be regenerated
+     * before they can be read against a surveyed outline.</p>
+     */
+    static final String GEOMETRY_SCHEMA_VERSION = "multi-floor-2";
+    /** Schemas that carry a complete room, door and window set for every requested floor. */
+    static final java.util.Set<String> MULTI_FLOOR_SCHEMAS =
+            java.util.Set.of("multi-floor-1", GEOMETRY_SCHEMA_VERSION);
+
     private static final List<Strategy> STRATEGIES = List.of(
             new Strategy("BUDGET_OPTIMIZED", "Efficient Courtyard", .43, .46,
                     88, 82, 95, List.of(
@@ -94,7 +107,7 @@ class GeometryEngine {
             provenance.put("modelVersion", "not-applicable");
             provenance.put("promptVersion", "not-used");
             provenance.put("strategyId", strategy.key());
-            provenance.put("geometrySchemaVersion", "multi-floor-1");
+            provenance.put("geometrySchemaVersion", GEOMETRY_SCHEMA_VERSION);
             provenance.put("requestedFloors", String.valueOf(details.floors()));
             provenance.put("roadFacing", details.roadFacing().name());
             provenance.put("householdAdults", String.valueOf(details.family().adults()));
@@ -190,7 +203,9 @@ class GeometryEngine {
                     92 - index,
                     new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms,
                             doors, windows, envelope.plot().vertices(), envelope.buildableOutline(),
-                            envelope.setbacks(), envelope.plotArea(), envelope.buildableArea()),
+                            envelope.setbacks(), envelope.plotArea(), envelope.buildableArea(),
+                            siteElements(envelope, details.roadFacing(), optionParameters,
+                                    details.category())),
                     List.copyOf(violations),
                     softRecommendations(envelope),
                     programmeExplanations(strategy, variant, programmeGaps),
@@ -217,6 +232,91 @@ class GeometryEngine {
         notes.add("Verify setbacks against the applicable local authority release.");
         notes.add("A licensed structural engineer must approve the final grid.");
         return List.copyOf(notes);
+    }
+
+    /** Depth a car needs to stand clear of the building, in feet. */
+    private static final double CAR_LENGTH = 16d;
+    private static final double CAR_WIDTH = 8.5d;
+    /** Below this a strip of open ground is a margin, not somewhere a family would put anything. */
+    private static final double USABLE_OPEN_DEPTH = 6d;
+
+    /**
+     * Plans the open ground: where the cars stand, and what the rest of the plot becomes.
+     *
+     * <p>Parking goes outside the building whenever the approach can take it. A car parked in the
+     * setback costs a slab, not a storey, and every square foot it saves indoors is one the family
+     * gets as a room instead — which is why the reference plans customers bring us show a porch and a
+     * driveway rather than a garage eating the ground floor.</p>
+     *
+     * <p>The rest is only offered on the finishes that pay for it. Naming a lawn on a plot whose
+     * budget is spent on the shell would be drawing a promise the estimate cannot keep.</p>
+     */
+    private List<SiteElement> siteElements(BuildableEnvelope envelope, Facing facing,
+            HomeParameters parameters, Category category) {
+        var plot = PlotGeometry.bounds(envelope.plot().vertices());
+        var elements = new ArrayList<SiteElement>();
+        var footprintX = envelope.footprintX();
+        var footprintY = envelope.footprintY();
+        var footprintRight = footprintX + envelope.footprintWidth();
+        var footprintTop = footprintY + envelope.footprintLength();
+
+        // The four strips of open ground the building leaves, keyed by the compass edge they sit on.
+        var strips = new java.util.LinkedHashMap<Facing, double[]>();
+        strips.put(Facing.SOUTH, new double[] {plot.minimumX(), plot.minimumY(),
+                plot.width(), footprintY - plot.minimumY()});
+        strips.put(Facing.NORTH, new double[] {plot.minimumX(), footprintTop,
+                plot.width(), plot.maximumY() - footprintTop});
+        strips.put(Facing.WEST, new double[] {plot.minimumX(), plot.minimumY(),
+                footprintX - plot.minimumX(), plot.length()});
+        strips.put(Facing.EAST, new double[] {footprintRight, plot.minimumY(),
+                plot.maximumX() - footprintRight, plot.length()});
+
+        var approach = strips.get(facing);
+        var horizontalApproach = facing == Facing.NORTH || facing == Facing.SOUTH;
+        var approachDepth = horizontalApproach ? approach[3] : approach[2];
+        var approachRun = horizontalApproach ? approach[2] : approach[3];
+        // A front setback is usually shallower than a car is long, which is why so many Indian homes
+        // park along the boundary rather than nose-in. Both are real arrangements, so the depth that
+        // is actually available chooses between them instead of ruling parking out.
+        var noseIn = approachDepth >= CAR_LENGTH;
+        var bayDepth = noseIn ? CAR_LENGTH : CAR_WIDTH;
+        var runPerCar = noseIn ? CAR_WIDTH : CAR_LENGTH;
+        if (parameters.parkingCars() > 0 && approachDepth >= CAR_WIDTH) {
+            var parkedOutside = Math.min(parameters.parkingCars(),
+                    (int) Math.floor(approachRun / runPerCar));
+            if (parkedOutside > 0) {
+                var bayRun = parkedOutside * runPerCar;
+                var label = parkedOutside + " car open parking";
+                if (horizontalApproach) {
+                    var bayY = facing == Facing.SOUTH ? approach[1] + approach[3] - bayDepth : approach[1];
+                    elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
+                            approach[0] + (approach[2] - bayRun) / 2, bayY, bayRun, bayDepth));
+                } else {
+                    var bayX = facing == Facing.WEST ? approach[0] + approach[2] - bayDepth : approach[0];
+                    elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
+                            bayX, approach[1] + (approach[3] - bayRun) / 2, bayDepth, bayRun));
+                }
+            }
+        }
+
+        // Garden is a finish-tier promise, so it is only drawn where the specification carries it.
+        if (category == Category.LUXURY || category == Category.PREMIUM) {
+            var opposite = switch (facing) {
+                case NORTH -> Facing.SOUTH;
+                case SOUTH -> Facing.NORTH;
+                case EAST -> Facing.WEST;
+                case WEST -> Facing.EAST;
+            };
+            for (var edge : List.of(opposite, Facing.EAST, Facing.WEST, Facing.NORTH, Facing.SOUTH)) {
+                if (edge == facing || elements.stream().anyMatch(e -> e.type().equals("GARDEN"))) continue;
+                var strip = strips.get(edge);
+                var depth = edge == Facing.NORTH || edge == Facing.SOUTH ? strip[3] : strip[2];
+                if (depth < USABLE_OPEN_DEPTH) continue;
+                elements.add(SiteElement.of("site-garden", "GARDEN", "Garden",
+                        strip[0], strip[1], strip[2], strip[3]));
+            }
+        }
+        return List.copyOf(elements);
     }
 
     private boolean countsAsBuiltUp(RoomGeometry room) {
@@ -644,12 +744,7 @@ class GeometryEngine {
         if (!Double.isFinite(width) || width <= 0 || width > wallLength + .01) {
             violations.add(kind + " " + id + " has invalid width");
         }
-        var expectedAxis = switch (orientation) {
-            case "NORTH" -> room.y();
-            case "SOUTH" -> room.y() + room.length();
-            case "EAST" -> room.x() + room.width();
-            default -> room.x();
-        };
+        var expectedAxis = wallLine(room, orientation);
         var actualAxis = horizontal ? y : x;
         var position = horizontal ? x : y;
         var minimum = horizontal ? room.x() : room.y();
@@ -1062,11 +1157,8 @@ class GeometryEngine {
         var width = round2(Math.min(room.type().contains("PARKING") ? 8.0 : 3.6,
                 Math.max(2.4, wallLength * .32)));
         var door = opening(id, room, orientation,
-                horizontal ? room.x() + room.width() / 2
-                        : "WEST".equals(orientation) ? room.x() : room.x() + room.width(),
-                horizontal
-                        ? "NORTH".equals(orientation) ? room.y() : room.y() + room.length()
-                        : room.y() + room.length() / 2,
+                horizontal ? room.x() + room.width() / 2 : wallLine(room, orientation),
+                horizontal ? wallLine(room, orientation) : room.y() + room.length() / 2,
                 width);
         door.put("exterior", true);
         return Map.copyOf(door);
@@ -1146,9 +1238,10 @@ class GeometryEngine {
             var from = Math.max(first.x(), second.x());
             var to = Math.min(first.x() + first.width(), second.x() + second.width());
             if (to - from < 2.4) return null;
-            var firstAbove = first.y() < second.y();
-            var y = firstAbove ? first.y() + first.length() : first.y();
-            return new SharedEdge(first, second, firstAbove ? "SOUTH" : "NORTH",
+            // +y is north, so the room with the smaller y sits south of the other one.
+            var firstIsSouthern = first.y() < second.y();
+            var y = firstIsSouthern ? first.y() + first.length() : first.y();
+            return new SharedEdge(first, second, firstIsSouthern ? "NORTH" : "SOUTH",
                     round2((from + to) / 2), round2(y), round2(to - from), round2(from), round2(to), false);
         }
         return null;
@@ -1191,10 +1284,8 @@ class GeometryEngine {
                     continue;
                 }
                 var candidate = opening(id, room, orientation,
-                        horizontal ? center : "WEST".equals(orientation) ? room.x() : room.x() + room.width(),
-                        horizontal
-                                ? "NORTH".equals(orientation) ? room.y() : room.y() + room.length()
-                                : center,
+                        horizontal ? center : wallLine(room, orientation),
+                        horizontal ? wallLine(room, orientation) : center,
                         width);
                 candidate.remove("swing");
                 var interval = openingInterval(candidate);
@@ -1217,11 +1308,28 @@ class GeometryEngine {
 
     private List<String> exteriorSides(RoomGeometry room, Envelope envelope) {
         var sides = new ArrayList<String>();
-        if (Math.abs(room.y() - envelope.minimumY()) <= .02) sides.add("NORTH");
+        if (Math.abs(room.y() + room.length() - envelope.maximumY()) <= .02) sides.add("NORTH");
         if (Math.abs(room.x() + room.width() - envelope.maximumX()) <= .02) sides.add("EAST");
-        if (Math.abs(room.y() + room.length() - envelope.maximumY()) <= .02) sides.add("SOUTH");
+        if (Math.abs(room.y() - envelope.minimumY()) <= .02) sides.add("SOUTH");
         if (Math.abs(room.x() - envelope.minimumX()) <= .02) sides.add("WEST");
         return List.copyOf(sides);
+    }
+
+    /**
+     * The wall line of a room on one compass side.
+     *
+     * <p>The planning grid grows north with {@code +y}, exactly as {@link PlotBoundary} documents,
+     * so the north wall is the room's maximum y. Every opening coordinate, every validation check
+     * and every renderer derives its side from here, which is what keeps the packed layout, the
+     * setback envelope and the surveyed outline describing the same building.</p>
+     */
+    private double wallLine(RoomGeometry room, String orientation) {
+        return switch (orientation) {
+            case "NORTH" -> room.y() + room.length();
+            case "SOUTH" -> room.y();
+            case "EAST" -> room.x() + room.width();
+            default -> room.x();
+        };
     }
 
     private boolean touchesEnvelope(RoomGeometry room, Envelope envelope, String orientation) {

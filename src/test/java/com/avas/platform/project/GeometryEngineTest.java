@@ -77,7 +77,7 @@ class GeometryEngineTest {
                 assertThat(candidate.versions())
                         .containsEntry("generator", "AVAS deterministic layout engine")
                         .containsEntry("generationModel", "No generative AI model")
-                        .containsEntry("geometrySchemaVersion", "multi-floor-1")
+                        .containsEntry("geometrySchemaVersion", GeometryEngine.GEOMETRY_SCHEMA_VERSION)
                         .containsEntry("requestedFloors", String.valueOf(floors))
                         .containsEntry("roadFacing", "NORTH")
                         .containsEntry("strategyId", candidate.strategy())
@@ -132,9 +132,26 @@ class GeometryEngineTest {
         var internalWindow = new java.util.LinkedHashMap<>(windows.getFirst());
         var windowRoom = drawing.geometry().rooms().stream()
                 .filter(room -> room.id().equals(internalWindow.get("roomId"))).findFirst().orElseThrow();
-        internalWindow.put("orientation", "SOUTH");
-        internalWindow.put("x", windowRoom.x() + windowRoom.width() / 2);
-        internalWindow.put("y", windowRoom.y() + windowRoom.length());
+        // Move the window onto a wall this room shares with its neighbours rather than one on the
+        // building envelope, which is the case the validator has to reject.
+        var floorRooms = drawing.geometry().rooms().stream()
+                .filter(room -> windowRoom.floor().equals(room.floor())).toList();
+        record Wall(String orientation, double x, double y, boolean onEnvelope) {}
+        var interiorWall = java.util.List.of(
+                new Wall("NORTH", windowRoom.x() + windowRoom.width() / 2,
+                        windowRoom.y() + windowRoom.length(),
+                        onExtreme(floorRooms, windowRoom.y() + windowRoom.length(), "MAX_Y")),
+                new Wall("SOUTH", windowRoom.x() + windowRoom.width() / 2, windowRoom.y(),
+                        onExtreme(floorRooms, windowRoom.y(), "MIN_Y")),
+                new Wall("EAST", windowRoom.x() + windowRoom.width(),
+                        windowRoom.y() + windowRoom.length() / 2,
+                        onExtreme(floorRooms, windowRoom.x() + windowRoom.width(), "MAX_X")),
+                new Wall("WEST", windowRoom.x(), windowRoom.y() + windowRoom.length() / 2,
+                        onExtreme(floorRooms, windowRoom.x(), "MIN_X")))
+                .stream().filter(wall -> !wall.onEnvelope()).findFirst().orElseThrow();
+        internalWindow.put("orientation", interiorWall.orientation());
+        internalWindow.put("x", interiorWall.x());
+        internalWindow.put("y", interiorWall.y());
         windows.set(0, Map.copyOf(internalWindow));
 
         assertThat(engine.validateDocument(2, drawing.geometry().rooms(), doors, windows))
@@ -345,6 +362,57 @@ class GeometryEngineTest {
         return drawing.geometry().rooms().stream()
                 .filter(room -> room.id().equals(("GROUND".equals(floor) ? "G" : "F1") + "-R" + roomNumber))
                 .findFirst().orElseThrow().width();
+    }
+
+    /** True when a wall line sits on the named extreme of the floor's building envelope. */
+    private boolean onExtreme(List<RoomGeometry> rooms, double wallLine, String extreme) {
+        var value = switch (extreme) {
+            case "MAX_Y" -> rooms.stream().mapToDouble(room -> room.y() + room.length()).max().orElseThrow();
+            case "MIN_Y" -> rooms.stream().mapToDouble(RoomGeometry::y).min().orElseThrow();
+            case "MAX_X" -> rooms.stream().mapToDouble(room -> room.x() + room.width()).max().orElseThrow();
+            default -> rooms.stream().mapToDouble(RoomGeometry::x).min().orElseThrow();
+        };
+        return Math.abs(wallLine - value) <= .02;
+    }
+
+    @Test
+    void parksCarsOnTheApproachAndKeepsThatAreaOutOfTheBuiltUpTotal() {
+        var parameters = new HomeParameters("DUPLEX", "DOG_LEGGED", "NONE", 1, false, false,
+                false, 2, false, false);
+        var details = new BasicDetailsRequest(50, 70, Facing.SOUTH, "Jaipur", 2, 9_000_000,
+                Category.LUXURY, new FamilyDetails(2, 2, 1, true), List.of("Garden"), parameters);
+
+        var candidate = engine.generate("project-site", 1, details, recommendation(), versions()).getFirst();
+        var site = candidate.geometry().siteElements();
+
+        var parking = site.stream().filter(element -> element.type().equals("OUTDOOR_PARKING")).findFirst();
+        assertThat(parking).isPresent();
+        assertThat(parking.get().label()).isEqualTo("2 car open parking");
+        assertThat(parking.get().area()).isGreaterThan(200);
+        assertThat(site).anyMatch(element -> element.type().equals("GARDEN"));
+
+        // The whole point of parking outside: it is plot, not slab, so it must not reach the
+        // built-up figure the customer is quoted on.
+        var indoorParking = candidate.geometry().rooms().stream()
+                .filter(room -> room.type().contains("PARKING"))
+                .mapToDouble(RoomGeometry::area).sum();
+        var roomArea = candidate.geometry().rooms().stream().mapToDouble(RoomGeometry::area).sum();
+        assertThat(candidate.builtUpArea()).isLessThanOrEqualTo((int) Math.round(roomArea - indoorParking) + 1);
+        assertThat(site).allSatisfy(element -> assertThat(element.area()).isGreaterThan(0));
+    }
+
+    @Test
+    void leavesTheOpenGroundUnplannedWhenTheFinishDoesNotCarryIt() {
+        var parameters = new HomeParameters("DUPLEX", "DOG_LEGGED", "NONE", 1, false, false,
+                false, 0, false, false);
+        var details = new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur", 2, 5_000_000,
+                Category.STANDARD, new FamilyDetails(2, 2, 0, false), List.of("Natural light"), parameters);
+
+        var candidate = engine.generate("project-standard", 1, details, recommendation(), versions()).getFirst();
+
+        assertThat(candidate.geometry().siteElements())
+                .noneMatch(element -> element.type().equals("GARDEN"))
+                .noneMatch(element -> element.type().equals("OUTDOOR_PARKING"));
     }
 
     private BasicDetailsRequest details(double width, int floors) {

@@ -34,6 +34,10 @@ public class FloorPlanPdfService {
     private static final Color WALL = new Color(49, 45, 40);
     private static final Color FIXTURE = new Color(151, 137, 118);
     private static final Color WINDOW = new Color(63, 109, 140);
+    private static final Color GARDEN = new Color(226, 237, 218);
+    private static final Color PAVING = new Color(235, 231, 223);
+    private static final Color SITE_EDGE = new Color(150, 160, 140);
+    private static final Color SITE_INK = new Color(96, 106, 88);
     private static final Color[] ROOM_COLORS = {
             new Color(242, 225, 200), new Color(232, 222, 208), new Color(233, 228, 219),
             new Color(229, 229, 224), new Color(220, 232, 210), new Color(239, 227, 212)
@@ -90,7 +94,7 @@ public class FloorPlanPdfService {
                 throw new IllegalArgumentException("Drawing contains invalid room geometry: " + room.id());
             }
         }
-        if ("multi-floor-1".equals(versions(drawing).get("geometrySchemaVersion"))) {
+        if (multiFloorSchema(drawing)) {
             var represented = floorKeys(drawing);
             var expected = expectedFloorKeys(requestedFloorCount(project, drawing));
             if (!represented.equals(expected)) {
@@ -238,6 +242,12 @@ public class FloorPlanPdfService {
         var plotHeight = (float) geometry.plotLength() * scale;
         var originX = panelX + (panelWidth - plotWidth) / 2;
         var originY = panelY + bottomReserved + (availableHeight - plotHeight) / 2;
+        // Planning coordinates grow east and north; PDF y also grows up, so the plate is drawn
+        // without a flip and reads with north at the top, exactly like the site sheet. The plot
+        // corner offset keeps outlines that are not anchored at the origin in register.
+        var siteBounds = geometry.hasSiteContext() ? PlotGeometry.bounds(geometry.plotOutline()) : null;
+        var planX = originX - (float) (siteBounds == null ? 0 : siteBounds.minimumX()) * scale;
+        var planY = originY - (float) (siteBounds == null ? 0 : siteBounds.minimumY()) * scale;
 
         text(canvas, BOLD, 6.2f, CORAL, "AUTHORITATIVE FLOOR PLAN MAP", panelX + 12,
                 panelY + panelHeight - 16);
@@ -247,24 +257,51 @@ public class FloorPlanPdfService {
                 panelX + panelWidth - 12, panelY + panelHeight - 29);
         textRight(canvas, REGULAR, 5.8f, MUTED, "ALL DIMENSIONS IN FEET", panelX + panelWidth - 12,
                 panelY + panelHeight - 16);
-        fill(canvas, new Color(253, 252, 249), originX, originY, plotWidth, plotHeight);
-        stroke(canvas, WALL, 1.1f, originX, originY, plotWidth, plotHeight);
+        if (siteBounds == null) {
+            fill(canvas, new Color(253, 252, 249), originX, originY, plotWidth, plotHeight);
+            stroke(canvas, WALL, 1.1f, originX, originY, plotWidth, plotHeight);
+        } else {
+            // The plate is drawn on the surveyed outline, not on its bounding box, so a reader sees
+            // the rooms against the plot that was actually measured and the open space that is left.
+            java.util.function.BiFunction<Double, Double, float[]> project2d = (px, py) ->
+                    new float[] {planX + (float) (double) px * scale, planY + (float) (double) py * scale};
+            polygon(canvas, geometry.plotOutline(), project2d, new Color(253, 252, 249), WALL, 1.1f);
+            polygon(canvas, geometry.buildableOutline(), project2d, new Color(247, 249, 244),
+                    new Color(150, 173, 137), .7f);
+        }
 
+        // Only under the ground plate: parking and garden are on the ground, and repeating them
+        // beneath an upper floor would draw a lawn a storey up.
+        if (isGroundFloor(floor)) {
+            renderSiteElements(canvas, geometry.siteElements(), planX, planY, scale);
+        }
         for (int index = 0; index < rooms.size(); index++) {
             var room = rooms.get(index);
-            var roomX = originX + (float) room.x() * scale;
-            var roomY = originY + (float) (geometry.plotLength() - room.y() - room.length()) * scale;
+            var roomX = planX + (float) room.x() * scale;
+            var roomY = planY + (float) room.y() * scale;
             var roomWidth = (float) room.width() * scale;
             var roomHeight = (float) room.length() * scale;
             fill(canvas, ROOM_COLORS[index % ROOM_COLORS.length], roomX, roomY, roomWidth, roomHeight);
-            stroke(canvas, WALL, 1.15f, roomX, roomY, roomWidth, roomHeight);
+        }
+        // Partitions are stroked after every fill so a later room's fill cannot paint over the wall
+        // it shares with an earlier one, which is what made adjacent rooms read as one space.
+        for (var room : rooms) {
+            stroke(canvas, WALL, partitionWallWeight(scale), planX + (float) room.x() * scale,
+                    planY + (float) room.y() * scale, (float) room.width() * scale,
+                    (float) room.length() * scale);
+        }
+        for (var room : rooms) {
+            var roomX = planX + (float) room.x() * scale;
+            var roomY = planY + (float) room.y() * scale;
+            var roomWidth = (float) room.width() * scale;
+            var roomHeight = (float) room.length() * scale;
             renderRoomFixture(canvas, room, roomX, roomY, roomWidth, roomHeight);
             renderRoomLabel(canvas, room, roomX, roomY, roomWidth, roomHeight);
         }
-        renderBuildingEnvelope(canvas, rooms, originX, originY, scale, geometry.plotLength());
+        renderBuildingEnvelope(canvas, rooms, planX, planY, scale);
         renderOpenings(canvas, openingsForFloor(geometry.doors(), floor),
-                openingsForFloor(geometry.windows(), floor), originX, originY, scale,
-                geometry.plotLength());
+                openingsForFloor(geometry.windows(), floor), planX, planY, scale);
+        renderRoomDimensionChains(canvas, rooms, originX, originY, plotWidth, plotHeight, planX, planY, scale);
         renderPlanAnnotations(canvas, project, drawing, panelX, panelY, panelWidth, panelHeight,
                 originX, originY, plotWidth, plotHeight, floor, rooms);
         renderScaleBar(canvas, panelX + 12, panelY + 24, scale);
@@ -288,13 +325,23 @@ public class FloorPlanPdfService {
         while (fontSize > 3.4f && textWidth(BOLD, fontSize, label) > availableWidth) fontSize -= .2f;
         label = fitWidth(label, BOLD, fontSize, availableWidth);
 
+        // Name, size, area: the three facts a room is annotated with on a real plan, in that order
+        // of importance. Each line is dropped independently when the room is too small to carry it,
+        // so a utility cupboard still gets its name rather than an overset block of text.
+        var centreX = roomX + roomWidth / 2;
         var labelY = roomY + roomHeight * .39f;
-        textCentered(canvas, BOLD, fontSize, INK, label, roomX + roomWidth / 2, labelY);
-        var dimensions = oneDecimal(room.width()) + " ft x " + oneDecimal(room.length()) + " ft";
-        var dimensionSize = Math.max(3.4f, fontSize - 1.2f);
-        if (roomHeight >= 34 && textWidth(REGULAR, dimensionSize, dimensions) <= roomWidth - 6) {
-            textCentered(canvas, REGULAR, dimensionSize, MUTED, dimensions,
-                    roomX + roomWidth / 2, labelY - Math.max(7, fontSize + 1));
+        textCentered(canvas, BOLD, fontSize, INK, label, centreX, labelY);
+        var detailSize = Math.max(3.4f, fontSize - 1.2f);
+        var lineHeight = Math.max(6f, detailSize + 1.6f);
+        var dimensions = feetInches(room.width()) + " x " + feetInches(room.length());
+        var cursor = labelY - Math.max(7, fontSize + 1);
+        if (roomHeight >= 34 && textWidth(REGULAR, detailSize, dimensions) <= roomWidth - 6) {
+            textCentered(canvas, REGULAR, detailSize, MUTED, dimensions, centreX, cursor);
+            cursor -= lineHeight;
+        }
+        var area = grouped(Math.round(room.area())) + " SQ FT";
+        if (roomHeight >= 46 && textWidth(REGULAR, detailSize - .3f, area) <= roomWidth - 6) {
+            textCentered(canvas, REGULAR, detailSize - .3f, MUTED, area, centreX, cursor);
         }
     }
 
@@ -417,22 +464,75 @@ public class FloorPlanPdfService {
         }
     }
 
+    /**
+     * The open ground: parking on the approach, garden on what is left.
+     *
+     * <p>Drawn before the rooms so the building always paints over it, and deliberately unlike a
+     * room — a dashed edge and a wash rather than a walled, filled space. A reader has to be able to
+     * tell at a glance which lines are slab they are paying to build and which are the plot around
+     * it; a lawn drawn with a room's weight would read as an extra 600 sq ft of house.</p>
+     */
+    private void renderSiteElements(PDPageContentStream canvas, List<SiteElement> elements,
+            float planX, float planY, float scale) throws IOException {
+        for (var element : elements) {
+            var x = planX + (float) element.x() * scale;
+            var y = planY + (float) element.y() * scale;
+            var width = (float) element.width() * scale;
+            var height = (float) element.length() * scale;
+            if (width < 4 || height < 4) continue;
+            fill(canvas, "GARDEN".equals(element.type()) ? GARDEN : PAVING, x, y, width, height);
+            canvas.setLineDashPattern(new float[] {2.4f, 1.8f}, 0);
+            stroke(canvas, SITE_EDGE, .7f, x, y, width, height);
+            canvas.setLineDashPattern(new float[] {}, 0);
+
+            var label = safe(element.label());
+            var size = Math.min(5.6f, Math.max(3.6f, height * .18f));
+            while (size > 3.4f && textWidth(BOLD, size, label) > width - 5) size -= .2f;
+            if (textWidth(BOLD, size, label) > width - 5 || height < 11) continue;
+            var centreY = y + height / 2;
+            textCentered(canvas, BOLD, size, SITE_INK, label, x + width / 2,
+                    height >= 20 ? centreY + size * .3f : centreY - size * .35f);
+            var area = grouped(Math.round(element.area())) + " SQ FT";
+            if (height >= 20 && textWidth(REGULAR, size - .8f, area) <= width - 5) {
+                textCentered(canvas, REGULAR, size - .8f, SITE_INK, area, x + width / 2,
+                        centreY - size * .9f);
+            }
+        }
+    }
+
     private void renderBuildingEnvelope(PDPageContentStream canvas, List<RoomGeometry> rooms,
-            float originX, float originY, float scale, double plotLength) throws IOException {
+            float originX, float originY, float scale) throws IOException {
         if (rooms == null || rooms.isEmpty()) return;
         var minimumX = rooms.stream().mapToDouble(RoomGeometry::x).min().orElse(0);
         var maximumX = rooms.stream().mapToDouble(room -> room.x() + room.width()).max().orElse(0);
         var minimumY = rooms.stream().mapToDouble(RoomGeometry::y).min().orElse(0);
         var maximumY = rooms.stream().mapToDouble(room -> room.y() + room.length()).max().orElse(0);
         var x = originX + (float) minimumX * scale;
-        var y = originY + (float) (plotLength - maximumY) * scale;
+        var y = originY + (float) minimumY * scale;
         var width = (float) (maximumX - minimumX) * scale;
         var height = (float) (maximumY - minimumY) * scale;
-        stroke(canvas, WALL, 2.25f, x, y, width, height);
+        stroke(canvas, WALL, exteriorWallWeight(scale), x, y, width, height);
+    }
+
+    /**
+     * Wall weights taken from the wall itself rather than from a fixed hairline.
+     *
+     * <p>A plan reads as a construction drawing largely because its walls have mass: a 9 inch
+     * external wall and a 4.5 inch partition are visibly different, and both are visibly thicker
+     * than a furniture outline. Deriving the weight from the plate scale keeps that relationship
+     * true on a site sheet and on a full-page plan alike, and the clamps stop a very small or very
+     * large plate collapsing the distinction or flooding the plan with ink.</p>
+     */
+    private float exteriorWallWeight(float scale) {
+        return Math.clamp(.75f * scale, 1.6f, 8f);
+    }
+
+    private float partitionWallWeight(float scale) {
+        return Math.clamp(.375f * scale, 1f, 4.4f);
     }
 
     private void renderOpenings(PDPageContentStream canvas, List<Map<String, Object>> doors,
-            List<Map<String, Object>> windows, float originX, float originY, float scale, double plotLength)
+            List<Map<String, Object>> windows, float originX, float originY, float scale)
             throws IOException {
         for (var door : doors == null ? List.<Map<String, Object>>of() : doors) {
             var x = number(door.get("x"));
@@ -440,13 +540,16 @@ public class FloorPlanPdfService {
             var width = Math.max(2.4, number(door.get("width")));
             if (!Double.isFinite(x) || !Double.isFinite(y)) continue;
             var orientation = normalizedOrientation(door.get("orientation"), "SOUTH");
-            if ("EAST".equals(orientation) || "WEST".equals(orientation)) {
+            var vertical = "EAST".equals(orientation) || "WEST".equals(orientation);
+            if (vertical) {
                 renderVerticalDoor(canvas, x, y, width, orientation, door.get("swing"),
-                        originX, originY, scale, plotLength);
+                        originX, originY, scale);
             } else {
                 renderHorizontalDoor(canvas, x, y, width, orientation, door.get("swing"),
-                        originX, originY, scale, plotLength);
+                        originX, originY, scale);
             }
+            renderDoorTag(canvas, doorTag(door, width), originX + (float) x * scale,
+                    originY + (float) y * scale, vertical, scale);
         }
         for (var window : windows == null ? List.<Map<String, Object>>of() : windows) {
             var x = number(window.get("x"));
@@ -457,14 +560,14 @@ public class FloorPlanPdfService {
             if ("NORTH".equals(orientation) || "SOUTH".equals(orientation)) {
                 var fromX = originX + (float) (x - width / 2) * scale;
                 var toX = originX + (float) (x + width / 2) * scale;
-                var pointY = originY + (float) (plotLength - y) * scale;
+                var pointY = originY + (float) y * scale;
                 line(canvas, Color.WHITE, 3.1f, fromX, pointY, toX, pointY);
                 line(canvas, WINDOW, .8f, fromX, pointY - 1.1f, toX, pointY - 1.1f);
                 line(canvas, WINDOW, .8f, fromX, pointY + 1.1f, toX, pointY + 1.1f);
             } else {
                 var pointX = originX + (float) x * scale;
-                var fromY = originY + (float) (plotLength - y - width / 2) * scale;
-                var toY = originY + (float) (plotLength - y + width / 2) * scale;
+                var fromY = originY + (float) (y - width / 2) * scale;
+                var toY = originY + (float) (y + width / 2) * scale;
                 line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
                 line(canvas, WINDOW, .8f, pointX - 1.1f, fromY, pointX - 1.1f, toY);
                 line(canvas, WINDOW, .8f, pointX + 1.1f, fromY, pointX + 1.1f, toY);
@@ -472,12 +575,39 @@ public class FloorPlanPdfService {
         }
     }
 
+    /**
+     * The door schedule mark a builder orders against.
+     *
+     * <p>Indian residential sets tag the main door {@code MD} and number the rest by leaf width, so
+     * a 3 ft bedroom door and a 2 ft 6 in toilet door can be counted and priced separately from one
+     * schedule. Derived from the opening itself rather than stored, because the geometry already
+     * knows which door faces the street and how wide each leaf is.</p>
+     */
+    private String doorTag(Map<String, Object> door, double width) {
+        if (Boolean.TRUE.equals(door.get("exterior"))) return "MD";
+        return width >= 2.9 ? "D1" : "D2";
+    }
+
+    private void renderDoorTag(PDPageContentStream canvas, String tag, float x, float y,
+            boolean vertical, float scale) throws IOException {
+        // Below a certain plate scale the tags collide with the swings they belong to and stop being
+        // readable; the schedule still carries them, so the plan simply omits them.
+        if (scale < 5.5f) return;
+        var size = 4.2f;
+        var offset = 5.4f;
+        var tagX = vertical ? x + offset : x;
+        var tagY = vertical ? y : y - offset;
+        var half = textWidth(BOLD, size, tag) / 2 + 1.1f;
+        fill(canvas, Color.WHITE, tagX - half, tagY - 1.6f, half * 2, size + .8f);
+        textCentered(canvas, BOLD, size, CORAL, tag, tagX, tagY);
+    }
+
     private void renderHorizontalDoor(PDPageContentStream canvas, double x, double y, double width,
-            String orientation, Object swing, float originX, float originY, float scale, double plotLength)
+            String orientation, Object swing, float originX, float originY, float scale)
             throws IOException {
         var startX = originX + (float) (x - width / 2) * scale;
         var endX = originX + (float) (x + width / 2) * scale;
-        var pointY = originY + (float) (plotLength - y) * scale;
+        var pointY = originY + (float) y * scale;
         line(canvas, Color.WHITE, 3.1f, startX, pointY, endX, pointY);
         var radius = endX - startX;
         var direction = "NORTH".equals(orientation) ? -1f : 1f;
@@ -499,11 +629,11 @@ public class FloorPlanPdfService {
     }
 
     private void renderVerticalDoor(PDPageContentStream canvas, double x, double y, double width,
-            String orientation, Object swing, float originX, float originY, float scale, double plotLength)
+            String orientation, Object swing, float originX, float originY, float scale)
             throws IOException {
         var pointX = originX + (float) x * scale;
-        var fromY = originY + (float) (plotLength - y - width / 2) * scale;
-        var toY = originY + (float) (plotLength - y + width / 2) * scale;
+        var fromY = originY + (float) (y - width / 2) * scale;
+        var toY = originY + (float) (y + width / 2) * scale;
         line(canvas, Color.WHITE, 3.1f, pointX, fromY, pointX, toY);
         var radius = toY - fromY;
         var direction = "EAST".equals(orientation) ? -1f : 1f;
@@ -724,6 +854,77 @@ public class FloorPlanPdfService {
                 grouped(Math.round(floorProgramArea)) + " SQ FT " + floorTitle(floor).toUpperCase(Locale.ROOT)
                         + " PROGRAM AREA", panelX + panelWidth - 12,
                 panelY + 11);
+    }
+
+    /**
+     * The running dimension strings a builder actually sets a floor out from.
+     *
+     * <p>A single overall plot dimension says nothing about where a wall goes. These chains tick off
+     * every distinct wall face across the floor, bottom and left, exactly as a setting-out drawing
+     * does, and label each bay in feet and inches.</p>
+     *
+     * <p>Drawn in the gap between the building and the plot edge, and skipped entirely when the
+     * setback leaves no room for it: a chain overlapping the plan would be worse than no chain.</p>
+     */
+    private void renderRoomDimensionChains(PDPageContentStream canvas, List<RoomGeometry> rooms,
+            float originX, float originY, float plotWidth, float plotHeight, float planX, float planY,
+            float scale) throws IOException {
+        if (rooms.isEmpty()) return;
+        var minimumGutter = 16f;
+
+        var buildingLeft = planX + (float) rooms.stream().mapToDouble(RoomGeometry::x).min().orElse(0) * scale;
+        var buildingBottom = planY + (float) rooms.stream().mapToDouble(RoomGeometry::y).min().orElse(0) * scale;
+        if (buildingBottom - originY >= minimumGutter) {
+            var edges = edgePositions(rooms, true, planX, scale);
+            renderChain(canvas, edges, buildingBottom - 7, true, scale);
+        }
+        if (buildingLeft - originX >= minimumGutter) {
+            var edges = edgePositions(rooms, false, planY, scale);
+            renderChain(canvas, edges, buildingLeft - 7, false, scale);
+        }
+    }
+
+    /** Distinct wall faces on one axis, in page points, deduplicated at drawing tolerance. */
+    private List<Float> edgePositions(List<RoomGeometry> rooms, boolean horizontal, float planOrigin,
+            float scale) {
+        var positions = new java.util.TreeSet<Float>();
+        for (var room : rooms) {
+            var start = horizontal ? room.x() : room.y();
+            var extent = horizontal ? room.width() : room.length();
+            positions.add(planOrigin + (float) start * scale);
+            positions.add(planOrigin + (float) (start + extent) * scale);
+        }
+        var deduplicated = new java.util.ArrayList<Float>();
+        for (var position : positions) {
+            // Half a point is finer than any line this drawing renders, so two faces closer than
+            // that are one face as far as a reader is concerned.
+            if (deduplicated.isEmpty() || position - deduplicated.getLast() > .5f) deduplicated.add(position);
+        }
+        return deduplicated;
+    }
+
+    private void renderChain(PDPageContentStream canvas, List<Float> edges, float offset,
+            boolean horizontal, float scale) throws IOException {
+        if (edges.size() < 2) return;
+        var first = edges.getFirst();
+        var last = edges.getLast();
+        if (horizontal) line(canvas, MUTED, .4f, first, offset, last, offset);
+        else line(canvas, MUTED, .4f, offset, first, offset, last);
+        for (var edge : edges) {
+            if (horizontal) line(canvas, MUTED, .4f, edge, offset - 2.5f, edge, offset + 2.5f);
+            else line(canvas, MUTED, .4f, offset - 2.5f, edge, offset + 2.5f, edge);
+        }
+        for (int index = 0; index < edges.size() - 1; index++) {
+            var from = edges.get(index);
+            var to = edges.get(index + 1);
+            var label = feetInches((to - from) / scale);
+            var span = to - from;
+            // A bay narrower than its own label would collide with its neighbours; the tick marks
+            // still record the wall face, which is the part that matters for setting out.
+            if (textWidth(REGULAR, 4.4f, label) > span - 1.5f) continue;
+            if (horizontal) textCentered(canvas, REGULAR, 4.4f, MUTED, label, (from + to) / 2, offset - 5.6f);
+            else textRotated(canvas, REGULAR, 4.4f, MUTED, label, offset - 1.4f, (from + to) / 2, 90);
+        }
     }
 
     private void dimensionHorizontal(PDPageContentStream canvas, float fromX, float toX, float y, String label)
@@ -1029,6 +1230,18 @@ public class FloorPlanPdfService {
         return String.format(Locale.ROOT, "%.1f", value);
     }
 
+    /**
+     * Feet and inches, the way a room is dimensioned on a construction drawing.
+     *
+     * <p>Decimal feet are a planning convenience; nobody sets out a wall at 12.54 ft. Rounding to
+     * the nearest inch carries into the next foot at twelve, so 11.99 ft reads 12'-0" rather than
+     * the 11'-12" a naive truncation produces.</p>
+     */
+    private String feetInches(double value) {
+        var totalInches = (long) Math.round(Math.abs(value) * 12);
+        return (totalInches / 12) + "'-" + (totalInches % 12) + "\"";
+    }
+
     private String grouped(long value) {
         return String.format(Locale.US, "%,d", value);
     }
@@ -1111,9 +1324,19 @@ public class FloorPlanPdfService {
         return titleCase(normalizedFloor(floor)) + " Floor";
     }
 
+    private boolean isGroundFloor(String floor) {
+        return "GROUND".equals(normalizedFloor(floor));
+    }
+
     private boolean legacyIncomplete(ProjectSummary project, DrawingCandidate drawing) {
-        return !"multi-floor-1".equals(versions(drawing).get("geometrySchemaVersion"))
+        return !multiFloorSchema(drawing)
                 && !floorKeys(drawing).equals(expectedFloorKeys(requestedFloorCount(project, drawing)));
+    }
+
+    /** True when the document carries a full room, door and window set for every requested floor. */
+    private boolean multiFloorSchema(DrawingCandidate drawing) {
+        var schema = versions(drawing).get("geometrySchemaVersion");
+        return schema != null && GeometryEngine.MULTI_FLOOR_SCHEMAS.contains(schema);
     }
 
     private int requestedFloorCount(ProjectSummary project, DrawingCandidate drawing) {

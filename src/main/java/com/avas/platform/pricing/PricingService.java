@@ -16,6 +16,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -195,8 +196,8 @@ public class PricingService implements CostRateProvider {
         for (var requirement : query.requirements()) {
             var candidates = approved.stream()
                     .filter(value -> value.itemType() == requirement.itemType())
-                    .filter(value -> canonicalKey(value.category()).equals(canonicalKey(requirement.category())))
-                    .filter(value -> canonicalKey(value.unit()).equals(canonicalKey(requirement.unit())))
+                    .filter(value -> canonicalCategory(value.category()).equals(canonicalCategory(requirement.category())))
+                    .filter(value -> canonicalUnit(value.unit()).equals(canonicalUnit(requirement.unit())))
                     .toList();
             if (candidates.isEmpty()) continue;
             // Only the most trustworthy channel present is priced from. Market observation informs
@@ -346,6 +347,56 @@ public class PricingService implements CostRateProvider {
     private static String canonicalKey(String value) {
         return value == null ? "" : value.trim().toUpperCase(java.util.Locale.ROOT)
                 .replaceAll("[^A-Z0-9]+", "_").replaceAll("(^_|_$)", "");
+    }
+
+    /**
+     * Vocabulary a rate is matched on, after the words different sources use for the same thing.
+     *
+     * <p>Evidence and the quantity takeoff are written by different people for different readers. A
+     * takeoff line asks for {@code MASONRY} measured {@code EACH}; a supplier listing, a site
+     * engineer and a market collector all say {@code BRICK} priced per {@code NOS}. Matching on the
+     * literal string silently discards that evidence — the submission is approved, current and
+     * visible in the admin queue, yet no estimate ever prices from it, which is the least debuggable
+     * failure this service has. Synonyms are resolved here, once, rather than by making every source
+     * learn the takeoff's internal codes.</p>
+     *
+     * <p>These are spelling equivalences only. Nothing here converts a quantity or asserts that two
+     * different materials are interchangeable: {@code CFT} and {@code CU_FT} are one unit written two
+     * ways, whereas cubic feet and cubic metres are not, and must never be aliased.</p>
+     */
+    private static final Map<String, String> CATEGORY_SYNONYMS = Map.ofEntries(
+            Map.entry("BRICK", "MASONRY"),
+            Map.entry("BRICKS", "MASONRY"),
+            Map.entry("BLOCK", "MASONRY"),
+            Map.entry("BLOCKS", "MASONRY"),
+            Map.entry("AAC_BLOCK", "MASONRY"),
+            Map.entry("SAND", "AGGREGATE"),
+            Map.entry("STONE_AGGREGATE", "AGGREGATE"),
+            Map.entry("CEMENT_BAG", "CEMENT"),
+            Map.entry("TMT_STEEL", "STEEL"),
+            Map.entry("REINFORCEMENT_STEEL", "STEEL"));
+
+    private static final Map<String, String> UNIT_SYNONYMS = Map.ofEntries(
+            Map.entry("NOS", "EACH"),
+            Map.entry("NO", "EACH"),
+            Map.entry("PIECE", "EACH"),
+            Map.entry("PIECES", "EACH"),
+            Map.entry("PCS", "EACH"),
+            Map.entry("UNIT", "EACH"),
+            Map.entry("CFT", "CU_FT"),
+            Map.entry("CUBIC_FEET", "CU_FT"),
+            Map.entry("SQFT", "SQ_FT"),
+            Map.entry("SQUARE_FEET", "SQ_FT"),
+            Map.entry("BAGS", "BAG"));
+
+    private static String canonicalCategory(String value) {
+        var key = canonicalKey(value);
+        return CATEGORY_SYNONYMS.getOrDefault(key, key);
+    }
+
+    private static String canonicalUnit(String value) {
+        var key = canonicalKey(value);
+        return UNIT_SYNONYMS.getOrDefault(key, key);
     }
 
     private static ConfidenceLevel confidence(int count, int target) {

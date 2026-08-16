@@ -191,6 +191,44 @@ class PricingApiIntegrationTest {
     }
 
     @Test
+    void pricesFromEvidenceThatNamesTheSameMaterialAndUnitDifferently() throws Exception {
+        // A supplier listing and a market collector both say "bricks priced per NOS"; the quantity
+        // takeoff asks for MASONRY measured EACH. Matching those literally leaves the submission
+        // approved, current and visible in the admin queue while no estimate ever prices from it —
+        // a silent gap, because nothing in the product reports evidence that was never consulted.
+        var builder = register("BUILDER");
+        var result = mvc.perform(post("/api/v1/pricing/submissions")
+                        .header("Authorization", bearer(builder))
+                        .header("X-Active-Role", "BUILDER")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "itemName", "Red clay bricks, first class",
+                                "category", "BRICK", "itemType", "MATERIAL", "qualityTier", "STANDARD",
+                                "city", "Jaipur", "unit", "NOS", "unitPrice", 7.80,
+                                "observedOn", LocalDate.now().toString(), "source", "SUPPLIER_LISTING"))))
+                .andExpect(status().isOk())
+                .andReturn();
+        var publicId = json.readTree(result.getResponse().getContentAsString()).path("id").asText();
+
+        var admin = login("platform.admin", "StrongAdmin@2026");
+        mvc.perform(put("/api/v1/admin/pricing/submissions/{id}/decision", publicId)
+                        .header("Authorization", bearer(admin)).header("X-Active-Role", "ADMIN")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVED\",\"note\":\"Local supplier rate verified\"}"))
+                .andExpect(status().isOk());
+
+        var snapshot = rates.resolve(new CostRateQuery("tenant-test", "Jaipur", PriceCategory.STANDARD,
+                LocalDate.now(), List.of(new CostRateRequirement("MASONRY", PriceItemType.MATERIAL,
+                        "MASONRY", "EACH", new BigDecimal("5000.000")))));
+
+        assertThat(snapshot.evidence()).singleElement().satisfies(evidence -> {
+            assertThat(evidence.requirementCode()).isEqualTo("MASONRY");
+            assertThat(evidence.evidenceId()).isEqualTo(publicId);
+            assertThat(evidence.unitPrice()).isEqualByComparingTo("7.80");
+        });
+    }
+
+    @Test
     void aContributorCannotMintOfficialOrCollectedPriceEvidence() throws Exception {
         var builder = register("BUILDER");
 

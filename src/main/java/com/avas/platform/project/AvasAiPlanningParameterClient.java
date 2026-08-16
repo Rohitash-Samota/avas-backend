@@ -13,7 +13,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,8 +33,7 @@ class AvasAiPlanningParameterClient implements PlanningParameterClient {
             @Value("${avas.ai.service-key:}") String serviceKey,
             @Value("${avas.ai.enabled:false}") boolean enabled,
             @Value("${avas.ai.timeout-seconds:25}") long timeoutSeconds) {
-        this.http = builder.connectTimeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
-                .readTimeout(Duration.ofSeconds(Math.max(1, timeoutSeconds))).build();
+        this.http = AvasAiHttp.client(builder, timeoutSeconds);
         this.json = json;
         this.url = baseUrl.replaceAll("/$", "") + "/api/v1/plan-parameters";
         this.serviceKey = serviceKey == null ? "" : serviceKey.trim();

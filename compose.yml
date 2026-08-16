@@ -17,8 +17,18 @@ services:
       AVAS_BOOTSTRAP_ADMIN_MOBILE: ${AVAS_BOOTSTRAP_ADMIN_MOBILE:-}
       AVAS_BOOTSTRAP_ADMIN_PASSWORD: ${AVAS_BOOTSTRAP_ADMIN_PASSWORD:-}
       AVAS_BOOTSTRAP_ADMIN_TENANT_ID: ${AVAS_BOOTSTRAP_ADMIN_TENANT_ID:-tenant-production}
+      # The AI service runs on the host during local development, so the container reaches it
+      # through the host gateway rather than its own loopback. Both readings stay optional: the
+      # platform keeps its deterministic path whenever the service is unreachable or unkeyed.
+      AVAS_AI_ENABLED: ${AVAS_AI_ENABLED:-true}
+      AVAS_AI_BASE_URL: ${AVAS_AI_BASE_URL:-http://host.docker.internal:8090}
+      AVAS_AI_SERVICE_KEY: ${AVAS_AI_SERVICE_KEY:-}
+      AVAS_AI_OUTLINE_ENABLED: ${AVAS_AI_OUTLINE_ENABLED:-true}
     ports:
       - "8080:8080"
+    extra_hosts:
+      # Docker Desktop resolves this name already; declaring it keeps Linux hosts working too.
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy

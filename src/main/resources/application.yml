@@ -83,6 +83,10 @@ avas:
     base-url: ${AVAS_AI_BASE_URL:http://127.0.0.1:8090}
     service-key: ${AVAS_AI_SERVICE_KEY:}
     timeout-seconds: ${AVAS_AI_TIMEOUT_SECONDS:25}
+    # Reading a plot drawing uploads the file itself, so it is enabled separately from parameter
+    # optimization and is given the longer timeout an image or PDF reading needs.
+    outline-enabled: ${AVAS_AI_OUTLINE_ENABLED:false}
+    outline-timeout-seconds: ${AVAS_AI_OUTLINE_TIMEOUT_SECONDS:45}
   bootstrap-admin:
     enabled: ${AVAS_BOOTSTRAP_ADMIN_ENABLED:false}
     first-name: ${AVAS_BOOTSTRAP_ADMIN_FIRST_NAME:Platform}

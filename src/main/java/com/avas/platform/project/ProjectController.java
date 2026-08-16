@@ -45,14 +45,47 @@ public class ProjectController {
     @PostMapping(value = "/plot-documents/analyse", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     PlotDocumentAnalysis analysePlotDocument(
             @RequestPart("file") org.springframework.web.multipart.MultipartFile file,
-            @RequestParam(value = "roadFacing", required = false) Facing roadFacing) {
+            @RequestParam(value = "roadFacing", required = false) Facing roadFacing,
+            @AuthenticationPrincipal AvasPrincipal principal) {
         try {
             return plotDocuments.analyse(file.getOriginalFilename(), file.getContentType(),
-                    file.getBytes(), roadFacing);
+                    file.getBytes(), roadFacing, principal == null ? null : principal.tenantId());
         } catch (java.io.IOException exception) {
             throw new org.springframework.web.server.ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "The plot drawing upload could not be read", exception);
         }
+    }
+
+    /** A plot described in the customer's own words, for customers with no drawing to upload. */
+    public record PlotOutlineDescriptionRequest(
+            @NotBlank @jakarta.validation.constraints.Size(max = 600) String description,
+            Facing roadFacing,
+            @jakarta.validation.constraints.DecimalMin("10") Double widthFeet,
+            @jakarta.validation.constraints.DecimalMin("10") Double lengthFeet) {}
+
+    /** The proposal a customer confirms, corrects or discards. Never stored by this call. */
+    public record PlotOutlineProposalResponse(List<PlotVertex> vertices, Facing roadFacing, String shape,
+            int confidence, List<String> notes, String model, boolean fallbackUsed) {}
+
+    /**
+     * Draws the outline a description implies.
+     *
+     * <p>Like drawing analysis this is deliberately not project-scoped and stores nothing: it is a
+     * starting point for the boundary editor, and the customer owns every corner afterwards.</p>
+     */
+    @PostMapping("/plot-outlines/describe")
+    PlotOutlineProposalResponse describePlotOutline(@Valid @RequestBody PlotOutlineDescriptionRequest body,
+            @AuthenticationPrincipal AvasPrincipal principal) {
+        var suggestion = plotDocuments.describe(body.description(),
+                body.roadFacing() == null ? Facing.NORTH : body.roadFacing(),
+                body.widthFeet(), body.lengthFeet(), principal == null ? null : principal.tenantId());
+        return new PlotOutlineProposalResponse(
+                suggestion.hasBoundary() ? suggestion.boundary().vertices() : List.of(),
+                suggestion.hasBoundary() ? suggestion.boundary().roadFacing() : body.roadFacing(),
+                suggestion.shape(), suggestion.confidence(),
+                java.util.stream.Stream.concat(suggestion.notes().stream(), suggestion.warnings().stream())
+                        .toList(),
+                suggestion.model(), suggestion.fallbackUsed());
     }
 
     @PostMapping("/projects")
@@ -125,10 +158,16 @@ public class ProjectController {
         projectAccess(projectId, principal, request); return service.drawingJob(projectId, jobId);
     }
 
+    /**
+     * The concepts on offer right now, which is the newest generation and never more than three.
+     *
+     * <p>Superseded versions stay readable through {@code GET /drawings/{id}}, so a link into an
+     * earlier concept keeps resolving after a customer regenerates.</p>
+     */
     @GetMapping("/projects/{projectId}/drawings")
     List<DrawingCandidate> drawings(@PathVariable String projectId, HttpServletRequest request,
             @AuthenticationPrincipal AvasPrincipal principal) {
-        projectAccess(projectId, principal, request); return service.drawings(projectId);
+        projectAccess(projectId, principal, request); return service.currentDrawings(projectId);
     }
 
     @GetMapping("/drawings/{drawingId}")

@@ -20,7 +20,8 @@ public record GeometryDocument(
         List<PlotVertex> buildableOutline,
         SetbackRule setbacks,
         double plotArea,
-        double buildableArea
+        double buildableArea,
+        List<SiteElement> siteElements
 ) {
     public GeometryDocument {
         rooms = rooms == null ? List.of() : List.copyOf(rooms);
@@ -28,13 +29,23 @@ public record GeometryDocument(
         windows = windows == null ? List.of() : List.copyOf(windows);
         plotOutline = plotOutline == null ? List.of() : List.copyOf(plotOutline);
         buildableOutline = buildableOutline == null ? List.of() : List.copyOf(buildableOutline);
+        siteElements = siteElements == null ? List.of() : List.copyOf(siteElements);
+    }
+
+    /** Compatibility view for documents written before open site features were modelled. */
+    public GeometryDocument(String unit, double plotWidth, double plotLength, List<RoomGeometry> rooms,
+            List<Map<String, Object>> doors, List<Map<String, Object>> windows,
+            List<PlotVertex> plotOutline, List<PlotVertex> buildableOutline, SetbackRule setbacks,
+            double plotArea, double buildableArea) {
+        this(unit, plotWidth, plotLength, rooms, doors, windows, plotOutline, buildableOutline,
+                setbacks, plotArea, buildableArea, List.of());
     }
 
     /** Compatibility view for callers created before the plot outline was modelled. */
     public GeometryDocument(String unit, double plotWidth, double plotLength, List<RoomGeometry> rooms,
             List<Map<String, Object>> doors, List<Map<String, Object>> windows) {
         this(unit, plotWidth, plotLength, rooms, doors, windows, List.of(), List.of(), null,
-                plotWidth * plotLength, 0d);
+                plotWidth * plotLength, 0d, List.of());
     }
 
     /** True when a site plan can be drawn, rather than only the floor plates. */
