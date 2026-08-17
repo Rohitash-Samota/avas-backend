@@ -276,19 +276,13 @@ public class FloorPlanPdfService {
             renderSiteElements(canvas, geometry.siteElements(), planX, planY, scale);
         }
         for (int index = 0; index < rooms.size(); index++) {
-            var room = rooms.get(index);
-            var roomX = planX + (float) room.x() * scale;
-            var roomY = planY + (float) room.y() * scale;
-            var roomWidth = (float) room.width() * scale;
-            var roomHeight = (float) room.length() * scale;
-            fill(canvas, ROOM_COLORS[index % ROOM_COLORS.length], roomX, roomY, roomWidth, roomHeight);
+            fillRoom(canvas, ROOM_COLORS[index % ROOM_COLORS.length], rooms.get(index),
+                    planX, planY, scale);
         }
         // Partitions are stroked after every fill so a later room's fill cannot paint over the wall
         // it shares with an earlier one, which is what made adjacent rooms read as one space.
         for (var room : rooms) {
-            stroke(canvas, WALL, partitionWallWeight(scale), planX + (float) room.x() * scale,
-                    planY + (float) room.y() * scale, (float) room.width() * scale,
-                    (float) room.length() * scale);
+            strokeRoom(canvas, WALL, partitionWallWeight(scale), room, planX, planY, scale);
         }
         for (var room : rooms) {
             var roomX = planX + (float) room.x() * scale;
@@ -335,7 +329,10 @@ public class FloorPlanPdfService {
         var lineHeight = Math.max(6f, detailSize + 1.6f);
         var dimensions = feetInches(room.width()) + " x " + feetInches(room.length());
         var cursor = labelY - Math.max(7, fontSize + 1);
-        if (roomHeight >= 34 && textWidth(REGULAR, detailSize, dimensions) <= roomWidth - 6) {
+        // A room following a slanted boundary has no single width by length: its bounding box would
+        // quote a size larger than the room, so it is annotated by its area alone.
+        if (!room.shaped() && roomHeight >= 34
+                && textWidth(REGULAR, detailSize, dimensions) <= roomWidth - 6) {
             textCentered(canvas, REGULAR, detailSize, MUTED, dimensions, centreX, cursor);
             cursor -= lineHeight;
         }
@@ -1106,6 +1103,54 @@ public class FloorPlanPdfService {
         canvas.setNonStrokingColor(color);
         canvas.addRect(x, y, width, height);
         canvas.fill();
+    }
+
+    /**
+     * Traces a room's own corners, for the rooms that follow a slanted plot boundary.
+     *
+     * <p>Their outer wall runs at the boundary's angle, so the rectangle the other rooms are drawn
+     * as would either stop short of it or cross it.</p>
+     */
+    private void roomPath(PDPageContentStream canvas, RoomGeometry room, float planX, float planY,
+            float scale) throws IOException {
+        var corners = room.corners();
+        for (var index = 0; index < corners.size(); index++) {
+            var corner = corners.get(index);
+            var x = planX + corner.x().floatValue() * scale;
+            var y = planY + corner.y().floatValue() * scale;
+            if (index == 0) {
+                canvas.moveTo(x, y);
+            } else {
+                canvas.lineTo(x, y);
+            }
+        }
+        canvas.closePath();
+    }
+
+    private void fillRoom(PDPageContentStream canvas, Color color, RoomGeometry room, float planX,
+            float planY, float scale) throws IOException {
+        if (!room.shaped()) {
+            fill(canvas, color, planX + (float) room.x() * scale, planY + (float) room.y() * scale,
+                    (float) room.width() * scale, (float) room.length() * scale);
+            return;
+        }
+        canvas.setNonStrokingColor(color);
+        roomPath(canvas, room, planX, planY, scale);
+        canvas.fill();
+    }
+
+    private void strokeRoom(PDPageContentStream canvas, Color color, float lineWidth,
+            RoomGeometry room, float planX, float planY, float scale) throws IOException {
+        if (!room.shaped()) {
+            stroke(canvas, color, lineWidth, planX + (float) room.x() * scale,
+                    planY + (float) room.y() * scale, (float) room.width() * scale,
+                    (float) room.length() * scale);
+            return;
+        }
+        canvas.setStrokingColor(color);
+        canvas.setLineWidth(lineWidth);
+        roomPath(canvas, room, planX, planY, scale);
+        canvas.stroke();
     }
 
     private void stroke(PDPageContentStream canvas, Color color, float lineWidth,

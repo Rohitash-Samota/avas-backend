@@ -82,8 +82,28 @@ public record SetbackRule(
     /** Marks an assumption that had to be capped against an unusually proportioned plot. */
     public static final String ASSUMED_CAPPED = "AVAS_PLANNING_ASSUMPTION_CAPPED";
 
+    /** Marks an envelope the customer asked to build across the whole plot. */
+    public static final String WAIVED = "NO_SETBACK_APPLIED";
+
     public static SetbackRule none() {
-        return new SetbackRule(0, 0, 0, "NO_SETBACK_APPLIED");
+        return new SetbackRule(0, 0, 0, WAIVED);
+    }
+
+    /**
+     * The rule the customer's plot-usage choice implies.
+     *
+     * <p>{@link HomeParameters#FULL_PLOT} waives open space entirely, which is what most plots in
+     * this market are actually built to and what a customer means by using their whole plot. It is
+     * an instruction rather than a finding: the envelope stage records the waiver against the
+     * drawing so nobody downstream mistakes a full-plot layout for an approvable one.</p>
+     */
+    public static SetbackRule forUsage(PlotBoundary boundary, int floors, String plotUsage) {
+        return HomeParameters.FULL_PLOT.equals(plotUsage) ? none() : assumedFor(boundary, floors);
+    }
+
+    /** True when no open space was applied, because the customer chose to build across the plot. */
+    public boolean waived() {
+        return WAIVED.equals(source);
     }
 
     /** Smallest buildable strip either axis should retain before expert review is warranted. */

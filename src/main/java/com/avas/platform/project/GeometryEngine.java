@@ -20,15 +20,20 @@ class GeometryEngine {
     /**
      * Current geometry document schema.
      *
+     * <p>{@code multi-floor-3} replaced the fixed grid packer with the programme-driven
+     * {@link FloorPlanner}: every storey now carries a circulation corridor, rooms are held to the
+     * dimensions their type is usable at, and a private bathroom sits against the bedroom it serves.
+     * Earlier documents have no corridor and rooms sized only by area, so they cannot be read as a
+     * buildable arrangement and are reported as needing a regenerated version.</p>
+     *
      * <p>{@code multi-floor-2} corrected the opening compass convention: north is the maximum y of
      * the planning grid, matching {@link PlotBoundary} and the setback envelope. Documents still
-     * stamped {@code multi-floor-1} carry openings mirrored north to south and must be regenerated
-     * before they can be read against a surveyed outline.</p>
+     * stamped {@code multi-floor-1} carry openings mirrored north to south.</p>
      */
-    static final String GEOMETRY_SCHEMA_VERSION = "multi-floor-2";
+    static final String GEOMETRY_SCHEMA_VERSION = "multi-floor-3";
     /** Schemas that carry a complete room, door and window set for every requested floor. */
     static final java.util.Set<String> MULTI_FLOOR_SCHEMAS =
-            java.util.Set.of("multi-floor-1", GEOMETRY_SCHEMA_VERSION);
+            java.util.Set.of("multi-floor-1", "multi-floor-2", GEOMETRY_SCHEMA_VERSION);
 
     private static final List<Strategy> STRATEGIES = List.of(
             new Strategy("BUDGET_OPTIMIZED", "Efficient Courtyard", .43, .46,
@@ -58,7 +63,8 @@ class GeometryEngine {
             PlanningParameterSet parameterSet) {
         var boundary = details.boundary();
         return generate(projectId, version, details, recommendation, versions, parameterSet,
-                BuildableEnvelope.derive(boundary, SetbackRule.assumedFor(boundary, details.floors()),
+                BuildableEnvelope.derive(boundary,
+                        SetbackRule.forUsage(boundary, details.floors(), details.parameters().plotUsage()),
                         details.floors()));
     }
 
@@ -83,10 +89,18 @@ class GeometryEngine {
             var strategy = STRATEGIES.get(index);
             var variant = variantFor(parameterSet, strategy.key());
             var optionParameters = optionParameters(details.parameters(), variant);
-            var rooms = packRooms(envelope, details.floors(), strategy,
-                    recommendation, optionParameters, variant);
+            var planner = plannerFor(envelope, details.roadFacing(), details.floors(), strategy,
+                    recommendation, optionParameters);
+            // Extension rooms join before the openings are placed, so the door tree reaches them
+            // through the walls they genuinely share rather than through an afterthought.
+            var rooms = extensionRooms(envelope, planner.planBuilding(), details.floors());
+            // A slanted boundary is the one edge rectangles cannot reach, so the rooms standing
+            // against it take the boundary's own line. Square plots are already flush against it.
+            if (envelope.setbacks().waived() && envelope.slanted()) {
+                rooms = followBoundary(rooms, envelope.buildableOutline());
+            }
             var doors = doorsFor(rooms, details.roadFacing());
-            var windows = windowsFor(rooms, doors);
+            var windows = windowsFor(rooms, doors, openSides(envelope, details.roadFacing()));
             // Rooms already contain every requested floor, so this is an aggregate area and must
             // not be multiplied by the floor count a second time. Outdoor programme zones are
             // deliberately excluded: pricing them again at the full built-up rate would double
@@ -140,6 +154,7 @@ class GeometryEngine {
                     String.valueOf(details.parameters().rainwaterHarvesting()));
             provenance.put("requestedHomeType", details.parameters().homeType());
             provenance.put("requestedStaircaseType", details.parameters().staircaseType());
+            provenance.put("requestedPlotUsage", details.parameters().plotUsage());
             provenance.put("finishTier", details.category().name());
             provenance.put("projectCity", details.city());
             provenance.put("plotOutlineCorners", String.valueOf(envelope.plot().vertices().size()));
@@ -183,6 +198,8 @@ class GeometryEngine {
             provenance.put("parkingCars", String.valueOf(optionParameters.parkingCars()));
             provenance.put("solarReady", String.valueOf(optionParameters.solarReady()));
             provenance.put("rainwaterHarvesting", String.valueOf(optionParameters.rainwaterHarvesting()));
+            provenance.put("plotUsage", optionParameters.plotUsage());
+            provenance.put("setbacksWaived", String.valueOf(envelope.setbacks().waived()));
             if (variant != null) {
                 provenance.put("parameterVariantTitle", variant.title());
                 provenance.put("duplexZoning", variant.duplexZoning());
@@ -207,7 +224,8 @@ class GeometryEngine {
                             siteElements(envelope, details.roadFacing(), optionParameters,
                                     details.category())),
                     List.copyOf(violations),
-                    softRecommendations(envelope),
+                    softRecommendations(envelope, planner.notes(),
+                            daylightNotes(envelope, rooms, windows, details.roadFacing())),
                     programmeExplanations(strategy, variant, programmeGaps),
                     Map.copyOf(provenance),
                     reviewRequired ? "EXPERT_REVIEW" : "SUCCESS",
@@ -223,8 +241,59 @@ class GeometryEngine {
      * <p>The two standing professional-scope reminders always close the list so they can never be
      * pushed out by plot-specific notes.</p>
      */
-    private List<String> softRecommendations(BuildableEnvelope envelope) {
+    /**
+     * What building to the boundary costs the plan in light, said in rooms rather than in principle.
+     *
+     * <p>Two of the four walls are now party walls, so the rooms behind them have no window. That is
+     * the bargain of a house that uses its whole plot, and the customer is entitled to see the size
+     * of it on the drawing rather than discover it on site.</p>
+     */
+    private List<String> daylightNotes(BuildableEnvelope envelope, List<RoomGeometry> rooms,
+            List<Map<String, Object>> windows, Facing roadFacing) {
+        if (!envelope.setbacks().waived()) {
+            return List.of();
+        }
+        var lit = windows.stream().map(window -> String.valueOf(window.get("roomId")))
+                .collect(java.util.stream.Collectors.toSet());
+        var dark = rooms.stream()
+                .filter(room -> HABITABLE_TYPES.contains(room.type()))
+                .filter(room -> !lit.contains(room.id()))
+                .toList();
+        var notes = new ArrayList<String>();
+        var flanks = roadFacing == Facing.NORTH || roadFacing == Facing.SOUTH ? "east and west"
+                : "north and south";
+        notes.add("Building to the plot line makes the " + flanks + " walls party walls: they are "
+                + "shared with the neighbouring plots and carry no windows, so this layout takes its "
+                + "light from the road and rear faces the way a terraced city house does. The "
+                + "neighbours' consent and a party-wall agreement are needed before building.");
+        if (!dark.isEmpty()) {
+            notes.add(dark.size() + " habitable room" + (dark.size() == 1 ? "" : "s")
+                    + " sit behind those party walls with no window ("
+                    + dark.stream().map(room -> roomLabel(room.type())).distinct()
+                            .collect(java.util.stream.Collectors.joining(", "))
+                    + "); a courtyard or lightwell cut into the plan is how a house this deep is "
+                    + "normally given daylight, and an architect should place one before this is built.");
+        }
+        return List.copyOf(notes);
+    }
+
+    /** Rooms a family lives in, which are the ones daylight is judged against. */
+    private static final java.util.Set<String> HABITABLE_TYPES = java.util.Set.of(
+            "LIVING_ROOM", "DINING", "KITCHEN", "FAMILY_LOUNGE", "BEDROOM", "MASTER_BEDROOM",
+            "SENIOR_BEDROOM", "FLEX_ROOM", "FLEX_GUEST_ROOM", "MULTIPURPOSE_ROOM", "STUDY",
+            "HOME_OFFICE", "PRAYER_ROOM");
+
+    private String roomLabel(String type) {
+        return type == null ? "room" : type.toLowerCase(Locale.ROOT).replace('_', ' ');
+    }
+
+    private List<String> softRecommendations(BuildableEnvelope envelope, List<String> plannerNotes,
+            List<String> daylightNotes) {
         var notes = new ArrayList<String>(envelope.notes());
+        notes.addAll(daylightNotes);
+        // Anything the planner had to compromise on is said here rather than left for the customer
+        // to spot in the drawing: a squeezed stair core, a room the plot could not carry.
+        plannerNotes.stream().distinct().forEach(notes::add);
         if (envelope.underUsesEnvelope()) {
             notes.add("An architect can recover additional area by following the plot outline instead of the "
                     + "largest inscribed rectangle AVAS packs into.");
@@ -249,10 +318,19 @@ class GeometryEngine {
      * driveway rather than a garage eating the ground floor.</p>
      *
      * <p>The rest is only offered on the finishes that pay for it. Naming a lawn on a plot whose
-     * budget is spent on the shell would be drawing a promise the estimate cannot keep.</p>
+     * budget is spent on the shell would be drawing a promise the estimate cannot keep — unless the
+     * customer chose {@link HomeParameters#OPEN_SPACE}, which is them saying the open ground is the
+     * point and should be planned rather than left over.</p>
+     *
+     * <p>Full plot usage plans no open ground at all. The building occupies the outline, so a strip
+     * drawn beside it would be a sliver the envelope already gave to a room: the cars belong indoors
+     * on that choice, and the planner places them there.</p>
      */
     private List<SiteElement> siteElements(BuildableEnvelope envelope, Facing facing,
             HomeParameters parameters, Category category) {
+        if (parameters.usesFullPlot()) {
+            return List.of();
+        }
         var plot = PlotGeometry.bounds(envelope.plot().vertices());
         var elements = new ArrayList<SiteElement>();
         var footprintX = envelope.footprintX();
@@ -299,8 +377,9 @@ class GeometryEngine {
             }
         }
 
-        // Garden is a finish-tier promise, so it is only drawn where the specification carries it.
-        if (category == Category.LUXURY || category == Category.PREMIUM) {
+        // Garden is a finish-tier promise, so it is only drawn where the specification carries it —
+        // or where the customer asked for the open ground to be planned, which buys it at any tier.
+        if (parameters.plansOpenSpace() || category == Category.LUXURY || category == Category.PREMIUM) {
             var opposite = switch (facing) {
                 case NORTH -> Facing.SOUTH;
                 case SOUTH -> Facing.NORTH;
@@ -515,6 +594,23 @@ class GeometryEngine {
 
     private boolean rectangleInside(List<PlotVertex> outline, RoomGeometry room) {
         var inset = 0.02d;
+        if (room.shaped()) {
+            // A room that follows the boundary stands its wall on it, so its corners lie on the
+            // line rather than inside it. What has to hold is that no part of the room crosses:
+            // every corner is on or inside, and so is the middle of every wall between them, which
+            // is where a room bulging out between two legal corners would show.
+            var corners = room.corners();
+            for (var index = 0; index < corners.size(); index++) {
+                var corner = corners.get(index);
+                var next = corners.get((index + 1) % corners.size());
+                if (!PlotGeometry.insideOrOn(outline, corner.x(), corner.y(), inset)
+                        || !PlotGeometry.insideOrOn(outline, (corner.x() + next.x()) / 2,
+                                (corner.y() + next.y()) / 2, inset)) {
+                    return false;
+                }
+            }
+            return true;
+        }
         var left = room.x() + inset;
         var right = room.x() + room.width() - inset;
         var bottom = room.y() + inset;
@@ -553,7 +649,7 @@ class GeometryEngine {
                     .filter(room -> floor.equals(normalizedFloor(room.floor()))).toList()));
         }
         validateDoors(doors, roomsById, envelopes, violations);
-        validateWindows(windows, roomsById, envelopes, violations);
+        validateWindows(windows, roomsById, envelopes, rooms, violations);
         validateOpeningSeparation(doors, windows, violations);
         validateConnectivity(rooms, doors, violations);
         return List.copyOf(violations);
@@ -686,7 +782,7 @@ class GeometryEngine {
     }
 
     private void validateWindows(List<Map<String, Object>> windows, Map<String, RoomGeometry> roomsById,
-            Map<String, Envelope> envelopes, List<String> violations) {
+            Map<String, Envelope> envelopes, List<RoomGeometry> rooms, List<String> violations) {
         var ids = new LinkedHashSet<String>();
         var physicalOpenings = new LinkedHashSet<String>();
         for (var opening : windows) {
@@ -712,8 +808,14 @@ class GeometryEngine {
             var width = number(opening.get("width"));
             validateOpeningOnRoom("window", id, room, orientation, x, y, width, violations);
             var envelope = envelopes.get(floor);
-            if (envelope == null || !touchesEnvelope(room, envelope, orientation)) {
-                violations.add("window " + id + " is not on the exterior building envelope");
+            // A window belongs on a wall with daylight behind it. That is the outside of the
+            // building, or — for a house built to its boundaries, where most walls are party walls —
+            // a courtyard or terrace the plan opened inside itself for exactly this reason.
+            var floorRooms = rooms.stream()
+                    .filter(other -> floor.equals(normalizedFloor(other.floor()))).toList();
+            if ((envelope == null || !touchesEnvelope(room, envelope, orientation))
+                    && !lightWellSides(room, floorRooms).contains(orientation)) {
+                violations.add("window " + id + " opens onto neither the outside nor a light well");
             }
             var physicalKey = physicalOpeningKey(floor, orientation, x, y);
             if (!physicalOpenings.add(physicalKey)) {
@@ -851,218 +953,263 @@ class GeometryEngine {
         }
     }
 
-    private List<RoomGeometry> packRooms(BuildableEnvelope envelope, int floorCount, Strategy strategy,
-            Recommendation recommendation, HomeParameters parameters, PlanningParameterVariant variant) {
-        var rooms = new ArrayList<RoomGeometry>();
-        var bedroomAllocation = bedroomAllocation(recommendation.bedrooms(), floorCount);
-        var liftRequired = floorCount > 1 && !"NONE".equals(parameters.liftProvision());
+    /**
+     * Plans every storey through the programme-driven {@link FloorPlanner}.
+     *
+     * <p>The strategy contributes only the two proportions it is entitled to — how the plate splits
+     * either side of the circulation spine, and how deep the public band on the road runs. Room
+     * sizing itself belongs to the planner, because a strategy that could stretch a bedroom past the
+     * dimensions it is usable at would be choosing a look over a home.</p>
+     */
+    private FloorPlanner plannerFor(BuildableEnvelope envelope, Facing roadFacing, int floorCount,
+            Strategy strategy, Recommendation recommendation, HomeParameters parameters) {
+        return new FloorPlanner(envelope, roadFacing, floorCount, strategy.columnSplit(),
+                strategy.rowSplit(), recommendation, parameters);
+    }
+
+    /** Floor area an extension room aims for, matched to the ordinary rooms beside it. */
+    private static final double EXTENSION_ROOM_AREA = 150d;
+    /** Shortest side an extension room may be drawn at, in feet. */
+    private static final double EXTENSION_MINIMUM_SIDE = 7d;
+    /** Most rooms one extension zone is worth splitting into. */
+    private static final int MAX_EXTENSION_ROOMS = 4;
+    /**
+     * What the ground floor gains from land beside the packed rectangle, most useful first.
+     *
+     * <p>Deliberately none of the counted programme. The recommendation fixes the bedroom and
+     * bathroom count from the household, so an extension bedroom would not read as the plot serving
+     * the family better — it would read as the layout disagreeing with its own brief.</p>
+     */
+    private static final List<String> GROUND_EXTENSION_TYPES =
+            List.of("FAMILY_LOUNGE", "HOME_OFFICE", "MULTIPURPOSE_ROOM", "STORE");
+    /** The same for an upper storey, where the useful additions are study and shared space. */
+    private static final List<String> UPPER_EXTENSION_TYPES =
+            List.of("FAMILY_LOUNGE", "STUDY", "MULTIPURPOSE_ROOM", "STORE");
+
+    /**
+     * Rooms for the ground the packed rectangle could not reach.
+     *
+     * <p>The packer plans rectangles, so an irregular plot has always been served by planning the
+     * largest one and calling the remainder unusable. Under full plot usage that remainder is
+     * exactly what the customer asked to build on, so each extension zone is subdivided into rooms
+     * and handed to the same door and window passes as the rest of the storey — which is what
+     * connects them to the house rather than leaving them stranded beside it.</p>
+     *
+     * <p>Zones repeat on every storey. They are plot geometry, not a ground-floor decision, and a
+     * storey that stopped short of them would leave the floor above overhanging open air.</p>
+     */
+    private List<RoomGeometry> extensionRooms(BuildableEnvelope envelope,
+            List<RoomGeometry> planned, int floorCount) {
+        if (envelope.extensionZones().isEmpty()) {
+            return planned;
+        }
+        var rooms = new ArrayList<>(planned);
         for (var floorIndex = 0; floorIndex < floorCount; floorIndex++) {
-            rooms.addAll(packFloor(envelope, strategy, floorIndex, floorCount,
-                    bedroomAllocation.get(floorIndex),
-                    recommendation.seniorCitizenBedroom(), liftRequired, parameters, variant));
+            var floor = floorName(floorIndex);
+            var index = 1 + (int) planned.stream()
+                    .filter(room -> normalizedFloor(room.floor()).equals(floor)).count();
+            var types = floorIndex == 0 ? GROUND_EXTENSION_TYPES : UPPER_EXTENSION_TYPES;
+            var taken = 0;
+            for (var zone : envelope.extensionZones()) {
+                var pieces = subdivideZone(zone);
+                if (pieces.isEmpty()) {
+                    // Too narrow to be a room, so it becomes depth on the rooms already facing it.
+                    var onFloor = rooms.stream()
+                            .filter(room -> normalizedFloor(room.floor()).equals(floor)).toList();
+                    var grown = absorbStrip(onFloor, zone);
+                    rooms.removeAll(onFloor);
+                    rooms.addAll(grown);
+                    continue;
+                }
+                for (var piece : pieces) {
+                    var type = types.get(Math.min(taken, types.size() - 1));
+                    taken++;
+                    rooms.add(room(floorIndex, index++, type,
+                            piece.x(), piece.y(), piece.width(), piece.length()));
+                }
+            }
         }
         return List.copyOf(rooms);
     }
 
-    private List<Integer> bedroomAllocation(int requestedBedrooms, int floorCount) {
-        var target = Math.max(1, Math.min(6, requestedBedrooms));
-        var result = new ArrayList<Integer>();
-        var upperCapacity = Math.max(0, floorCount - 1) * 4;
-        var groundBedrooms = Math.max(1, target - upperCapacity);
-        result.add(groundBedrooms);
-        var remaining = target - groundBedrooms;
-        for (var floor = 1; floor < floorCount; floor++) {
-            var remainingFloors = floorCount - floor;
-            var count = Math.min(4, (int) Math.ceil(remaining / (double) remainingFloors));
-            result.add(count);
-            remaining -= count;
+    /**
+     * Hands leftover ground too narrow to be a room to the rooms standing along it.
+     *
+     * <p>A strip four feet wide is not a room, but it is still floor the customer asked to build on.
+     * It is split at the edges of the rooms that face it and each share is given to the room it
+     * touches, so a strip becomes depth on the rooms beside it rather than a slot of nothing. The
+     * split is what keeps every room rectangular: a room only ever grows across the full width of
+     * its own edge, so its new outline is still a rectangle.</p>
+     *
+     * <p>Any part of the strip no room faces stays unbuilt. That is the margin against a slanted
+     * boundary, and it belongs to the plot rather than to a room that cannot reach it.</p>
+     */
+    private List<RoomGeometry> absorbStrip(List<RoomGeometry> rooms, PlotGeometry.Rect strip) {
+        var grown = new ArrayList<RoomGeometry>(rooms.size());
+        for (var room : rooms) {
+            grown.add(growInto(room, strip));
         }
-        return List.copyOf(result);
+        return grown;
     }
 
-    private List<RoomGeometry> packFloor(BuildableEnvelope envelope, Strategy strategy, int floorIndex,
-            int floorCount, int bedroomCount, boolean seniorBedroomRequired, boolean liftRequired,
-            HomeParameters parameters, PlanningParameterVariant variant) {
-        // The building fills the setback-derived footprint exactly. Required open space is already
-        // subtracted by the envelope, so no second percentage margin may be applied here.
-        var innerWidth = envelope.footprintWidth();
-        var innerLength = envelope.footprintLength();
-        var startX = envelope.footprintX();
-        var startY = envelope.footprintY();
-        // Keep the structural envelope and stair stack aligned, but vary the internal grid so each
-        // storey is genuine floor-specific geometry rather than a renamed ground-floor copy.
-        var baseLeftWidth = innerWidth * strategy.columnSplit();
-        var baseRightWidth = innerWidth - baseLeftWidth;
-        var baseTopLength = innerLength * strategy.rowSplit();
-        var baseBottomLength = innerLength - baseTopLength;
-        // One shared, pre-snapped grid for every storey. The stair and lift stack must be
-        // bit-identical floor to floor, so the core lines are computed once here instead of being
-        // re-derived per floor from expressions that only happen to agree.
-        var grid = new FloorGrid(
-                round2(startX),
-                round2(startX + baseLeftWidth),
-                round2(startX + baseLeftWidth + baseRightWidth * .52),
-                round2(startX + baseLeftWidth + baseRightWidth * .38),
-                round2(startX + baseLeftWidth + baseRightWidth * .62),
-                round2(startX + innerWidth),
-                round2(startY),
-                round2(startY + baseTopLength),
-                round2(startY + baseTopLength + baseBottomLength * .58),
-                round2(startY + innerLength));
-        if (floorIndex == 0) {
-            return packGroundFloor(grid, baseLeftWidth, baseRightWidth,
-                    baseTopLength, baseBottomLength,
-                    bedroomCount, seniorBedroomRequired, floorCount > 1, liftRequired, parameters, variant);
+    /** The room extended over whatever share of the strip lies against one of its four walls. */
+    private RoomGeometry growInto(RoomGeometry room, PlotGeometry.Rect strip) {
+        var left = room.x();
+        var bottom = room.y();
+        var right = room.x() + room.width();
+        var top = room.y() + room.length();
+        var stripRight = strip.x() + strip.width();
+        var stripTop = strip.y() + strip.length();
+        // The strip has to cover the room's whole wall, not merely touch it. A room reaching past the
+        // end of the strip could only take it by turning an L, and growing the rectangle regardless
+        // would carry it over ground the strip never covered — off the plot, where the leg ends.
+        var withinRows = bottom >= strip.y() - GAP && top <= stripTop + GAP;
+        var withinColumns = left >= strip.x() - GAP && right <= stripRight + GAP;
+        var newLeft = withinRows && Math.abs(left - stripRight) <= GAP ? strip.x() : left;
+        var newRight = withinRows && Math.abs(right - strip.x()) <= GAP ? stripRight : right;
+        var newBottom = withinColumns && Math.abs(bottom - stripTop) <= GAP ? strip.y() : bottom;
+        var newTop = withinColumns && Math.abs(top - strip.y()) <= GAP ? stripTop : top;
+        // A room may only take the strip on one axis. Growing on two would claim the corner twice,
+        // and the second room along the strip would be drawn straight through it.
+        if (newLeft != left || newRight != right) {
+            newBottom = bottom;
+            newTop = top;
         }
-        var columnAdjustment = floorIndex == 1 ? .04 : -.03;
-        var rowAdjustment = floorIndex == 1 ? -.03 : .03;
-        // Upper storeys vary only their own top-row split, so each floor is genuine floor-specific
-        // geometry while the structural core stays aligned.
-        var topRowSplit = round2(startX + innerWidth * (strategy.columnSplit() + columnAdjustment));
-        var middleY = round2(startY + innerLength * (strategy.rowSplit() + rowAdjustment));
-        var types = roomProgram(floorIndex, bedroomCount);
-
-        var rooms = new ArrayList<RoomGeometry>();
-        rooms.add(room(floorIndex, 1, types.get(0), grid.leftLine(), grid.topLine(),
-                topRowSplit - grid.leftLine(), middleY - grid.topLine()));
-        rooms.add(room(floorIndex, 2, types.get(1), topRowSplit, grid.topLine(),
-                grid.rightLine() - topRowSplit, middleY - grid.topLine()));
-        rooms.add(room(floorIndex, 3, types.get(2), grid.leftLine(), middleY,
-                grid.coreX() - grid.leftLine(), grid.buildingBottom() - middleY));
-        rooms.add(room(floorIndex, 4, types.get(3), grid.coreX(), middleY,
-                grid.middleSplit() - grid.coreX(), grid.coreTop() - middleY));
-        rooms.add(room(floorIndex, 5, types.get(4), grid.middleSplit(), middleY,
-                grid.rightLine() - grid.middleSplit(), grid.coreTop() - middleY));
-        addVerticalCore(rooms, floorIndex, 6, grid.coreX(), grid.coreTop(), grid.coreWidth(),
-                grid.coreLength(), liftRequired);
-        var nextIndex = liftRequired ? 8 : 7;
-        rooms.add(room(floorIndex, nextIndex++, types.get(6), grid.coreMidLine(),
-                grid.coreTop(), grid.coreOuterLine() - grid.coreMidLine(), grid.coreLength()));
-        addOutdoorOrUtilityZones(rooms, floorIndex, floorCount, nextIndex,
-                grid.coreOuterLine(), grid.coreTop(), grid.rightLine() - grid.coreOuterLine(),
-                grid.coreLength(), types.get(7), parameters);
-        return List.copyOf(rooms);
+        if (newLeft == left && newRight == right && newBottom == bottom && newTop == top) {
+            return room;
+        }
+        // The share is clipped to the room's own span, so what it gains is exactly the rectangle in
+        // front of it and never a neighbour's.
+        var width = round2(newRight - newLeft);
+        var length = round2(newTop - newBottom);
+        return new RoomGeometry(room.id(), room.type(), round2(newLeft), round2(newBottom),
+                width, length, round2(width * length), room.floor());
     }
 
-    private List<RoomGeometry> packGroundFloor(FloorGrid grid, double leftWidth,
-            double rightWidth, double topLength, double bottomLength, int bedroomCount,
-            boolean seniorBedroomRequired, boolean stairRequired, boolean liftRequired, HomeParameters parameters,
-            PlanningParameterVariant variant) {
-        var startX = grid.leftLine();
-        var startY = grid.topLine();
-        var rooms = new ArrayList<RoomGeometry>();
-        var roomIndex = 1;
-        var parkingType = parameters.courtyardRequired()
-                ? parameters.parkingCars() > 0 ? "COURTYARD_PARKING" : "COURTYARD"
-                : parameters.parkingCars() > 0 ? bedroomCount >= 6 ? "BEDROOM" : "PARKING" : "OPEN_SPACE";
-        // The default 40 x 60 brief requests two cars. Give parking a genuine 8 x 16 ft module
-        // per side-by-side bay when the envelope permits it, while retaining at least eight feet
-        // for the adjacent living zone. Requests that cannot physically fit remain validation gaps.
-        var totalWidth = leftWidth + rightWidth;
-        var parkingWidth = leftWidth;
-        if (parkingType.contains("PARKING") && topLength >= 16) {
-            var desiredWidth = Math.max(leftWidth, parameters.parkingCars() * 8d);
-            parkingWidth = round2(Math.min(desiredWidth, Math.max(leftWidth, totalWidth - 8d)));
-        }
-        var topRowLength = grid.topRowBottom() - startY;
-        var topRightX = round2(startX + parkingWidth);
-        rooms.add(room(0, roomIndex++, parkingType, startX, startY, topRightX - startX, topRowLength));
+    /** Tolerance for two edges being the same line, in feet. */
+    private static final double GAP = .05d;
 
-        if (bedroomCount >= 3) {
-            var livingSplit = round2(topRightX + (grid.rightLine() - topRightX) * .55);
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY,
-                    livingSplit - topRightX, topRowLength));
-            rooms.add(room(0, roomIndex++, "BEDROOM", livingSplit, startY,
-                    grid.rightLine() - livingSplit, topRowLength));
-        } else {
-            rooms.add(room(0, roomIndex++, "LIVING_ROOM", topRightX, startY,
-                    grid.rightLine() - topRightX, topRowLength));
+    /**
+     * Lets the rooms on the edge of the plan follow a slanted boundary instead of stopping square
+     * of it.
+     *
+     * <p>Rectangles cannot be flush against a diagonal, so a tapered plot always kept a wedge of
+     * unbuilt ground down each side — on a forty by sixty taper that is a quarter of the plot. The
+     * room standing there is given the boundary's own line for its outer wall: its share of the plot
+     * is exactly the plot clipped to its frontage, slant included, which is the shape an architect
+     * would draw and the only one that reaches the corner.</p>
+     *
+     * <p>A room only takes ground no other room is standing on, so extending is never a room
+     * growing over its neighbour. Rooms with nothing but plot beyond them are the ones that
+     * move; everything behind them stays the rectangle it was.</p>
+     */
+    private List<RoomGeometry> followBoundary(List<RoomGeometry> rooms, List<PlotVertex> plot) {
+        var bounds = PlotGeometry.bounds(plot);
+        var shaped = new ArrayList<RoomGeometry>(rooms.size());
+        for (var room : rooms) {
+            var others = rooms.stream()
+                    .filter(other -> !other.id().equals(room.id()) && sameFloor(other, room))
+                    .toList();
+            var left = blocked(room, others, Side.WEST) ? room.x() : bounds.minimumX();
+            var right = blocked(room, others, Side.EAST) ? room.x() + room.width() : bounds.maximumX();
+            var bottom = blocked(room, others, Side.SOUTH) ? room.y() : bounds.minimumY();
+            var top = blocked(room, others, Side.NORTH) ? room.y() + room.length() : bounds.maximumY();
+            if (left == room.x() && bottom == room.y()
+                    && right == room.x() + room.width() && top == room.y() + room.length()) {
+                shaped.add(room);
+                continue;
+            }
+            var clipped = PlotGeometry.clipToRect(plot, left, bottom, right, top);
+            // Counter-clockwise, always. Anything walking the ring for wall surfaces — the massing
+            // view most of all — takes the outward face from the direction each edge runs, so a ring
+            // that came back wound the other way would turn every wall of the room inside out.
+            var ring = !clipped.isEmpty() && PlotGeometry.signedArea(clipped) < 0
+                    ? new ArrayList<>(clipped).reversed()
+                    : clipped;
+            var area = ring.isEmpty() ? 0 : Math.abs(PlotGeometry.signedArea(ring));
+            // Only worth reshaping when it actually recovers ground, and never when the clip came
+            // back as something that no longer contains the room it started as.
+            if (ring.isEmpty() || area <= room.area() + .5 || !containsRoom(ring, room)) {
+                shaped.add(room);
+                continue;
+            }
+            var box = PlotGeometry.bounds(ring);
+            shaped.add(new RoomGeometry(room.id(), room.type(), round2(box.minimumX()),
+                    round2(box.minimumY()), round2(box.width()), round2(box.length()),
+                    round2(area), room.floor(), ring));
         }
-
-        var primaryType = seniorBedroomRequired ? "SENIOR_BEDROOM" : "MASTER_BEDROOM";
-        if (bedroomCount >= 2) {
-            var primaryLength = round2(bottomLength * .54);
-            var secondaryY = round2(grid.topRowBottom() + primaryLength);
-            rooms.add(room(0, roomIndex++, primaryType, startX, grid.topRowBottom(),
-                    grid.coreX() - startX, primaryLength));
-            rooms.add(room(0, roomIndex++, "BEDROOM", startX, secondaryY,
-                    grid.coreX() - startX, grid.buildingBottom() - secondaryY));
-        } else {
-            rooms.add(room(0, roomIndex++, primaryType, startX, grid.topRowBottom(),
-                    grid.coreX() - startX, grid.buildingBottom() - grid.topRowBottom()));
-        }
-
-        rooms.add(room(0, roomIndex++, bedroomCount >= 5 ? "BEDROOM" : "DINING", grid.coreX(),
-                grid.topRowBottom(), grid.middleSplit() - grid.coreX(),
-                grid.coreTop() - grid.topRowBottom()));
-        rooms.add(room(0, roomIndex++, "KITCHEN", grid.middleSplit(), grid.topRowBottom(),
-                grid.rightLine() - grid.middleSplit(), grid.coreTop() - grid.topRowBottom()));
-        if (stairRequired) {
-            addVerticalCore(rooms, 0, roomIndex, grid.coreX(), grid.coreTop(), grid.coreWidth(),
-                    grid.coreLength(), liftRequired);
-            roomIndex += liftRequired ? 2 : 1;
-        } else {
-            rooms.add(room(0, roomIndex++, "STORE", grid.coreX(), grid.coreTop(), grid.coreWidth(),
-                    grid.coreLength()));
-        }
-        rooms.add(room(0, roomIndex++, "BATHROOM", grid.coreMidLine(), grid.coreTop(),
-                grid.coreOuterLine() - grid.coreMidLine(), grid.coreLength()));
-        rooms.add(room(0, roomIndex, bedroomCount >= 4 ? "BEDROOM" : "UTILITY",
-                grid.coreOuterLine(), grid.coreTop(),
-                grid.rightLine() - grid.coreOuterLine(), grid.coreLength()));
-        return List.copyOf(rooms);
+        return List.copyOf(shaped);
     }
 
-    private void addVerticalCore(List<RoomGeometry> rooms, int floorIndex, int startIndex,
-            double x, double y, double width, double length, boolean liftRequired) {
-        if (!liftRequired) {
-            rooms.add(room(floorIndex, startIndex, "STAIRCASE", x, y, width, length));
+    private enum Side { NORTH, SOUTH, EAST, WEST }
+
+    /** True when another room on the same storey stands between this one and the boundary. */
+    private boolean blocked(RoomGeometry room, List<RoomGeometry> others, Side side) {
+        for (var other : others) {
+            var sharesRows = other.y() < room.y() + room.length() - GAP
+                    && other.y() + other.length() > room.y() + GAP;
+            var sharesColumns = other.x() < room.x() + room.width() - GAP
+                    && other.x() + other.width() > room.x() + GAP;
+            var stands = switch (side) {
+                case WEST -> sharesRows && other.x() < room.x() + GAP;
+                case EAST -> sharesRows && other.x() + other.width() > room.x() + room.width() - GAP;
+                case SOUTH -> sharesColumns && other.y() < room.y() + GAP;
+                case NORTH -> sharesColumns && other.y() + other.length() > room.y() + room.length() - GAP;
+            };
+            if (stands) return true;
+        }
+        return false;
+    }
+
+    /** Guards against a clip that wandered off and returned a region the room is not even in. */
+    private boolean containsRoom(List<PlotVertex> ring, RoomGeometry room) {
+        var inset = .02d;
+        return PlotGeometry.containsPoint(ring, room.x() + inset, room.y() + inset)
+                && PlotGeometry.containsPoint(ring, room.x() + room.width() - inset, room.y() + inset)
+                && PlotGeometry.containsPoint(ring, room.x() + inset, room.y() + room.length() - inset)
+                && PlotGeometry.containsPoint(ring, room.x() + room.width() - inset,
+                        room.y() + room.length() - inset);
+    }
+
+    /** Splits one zone into rooms, or into nothing when it is too narrow to hold one. */
+    private List<PlotGeometry.Rect> subdivideZone(PlotGeometry.Rect zone) {
+        if (Math.min(zone.width(), zone.length()) < EXTENSION_MINIMUM_SIDE) {
+            return List.of();
+        }
+        var pieces = new ArrayList<PlotGeometry.Rect>();
+        bisectZone(zone, pieces);
+        return List.copyOf(pieces);
+    }
+
+    /**
+     * Halves a zone across its longer side until each piece is about the size of a room.
+     *
+     * <p>Halving rather than slicing into equal strips: slicing a chunky zone one way produces a
+     * rank of identical galleries, where halving alternates its own axis and arrives at rooms with
+     * the proportions rooms are actually furnished at. A twenty by thirty leg becomes four fifteen
+     * by ten rooms rather than four seven-and-a-half by twenty corridors.</p>
+     */
+    private void bisectZone(PlotGeometry.Rect zone, List<PlotGeometry.Rect> into) {
+        var horizontal = zone.width() >= zone.length();
+        var along = horizontal ? zone.width() : zone.length();
+        if (into.size() >= MAX_EXTENSION_ROOMS - 1
+                || zone.area() <= EXTENSION_ROOM_AREA * 1.5
+                || along / 2 < EXTENSION_MINIMUM_SIDE) {
+            into.add(zone);
             return;
         }
-        // The stair and lift share one aligned structural core on every floor. Keeping both
-        // rectangles identical across storeys makes the shaft provision auditable and validates
-        // the duplex circulation stack without inventing construction details.
-        var stairWidth = round2(width * .68);
-        rooms.add(room(floorIndex, startIndex, "STAIRCASE", x, y, stairWidth, length));
-        rooms.add(room(floorIndex, startIndex + 1, "LIFT_SHAFT", x + stairWidth, y,
-                round2(width - stairWidth), length));
-    }
-
-    private void addOutdoorOrUtilityZones(List<RoomGeometry> rooms, int floorIndex, int floorCount,
-            int startIndex, double x, double y, double width, double length, String fallbackType,
-            HomeParameters parameters) {
-        var zones = new ArrayList<String>();
-        var upperFloorCount = Math.max(1, floorCount - 1);
-        var baseBalconies = parameters.balconyCount() / upperFloorCount;
-        var extraBalconies = parameters.balconyCount() % upperFloorCount;
-        var upperIndex = Math.max(0, floorIndex - 1);
-        var balconiesHere = baseBalconies + (upperIndex < extraBalconies ? 1 : 0);
-        for (var index = 0; index < balconiesHere; index++) zones.add("BALCONY");
-        if (floorIndex == floorCount - 1 && parameters.terraceRequired()) zones.add("TERRACE");
-        if (zones.isEmpty()) zones.add(fallbackType);
-        var zoneWidth = width / zones.size();
-        for (var index = 0; index < zones.size(); index++) {
-            var fromX = x + zoneWidth * index;
-            var actualWidth = index == zones.size() - 1 ? x + width - fromX : zoneWidth;
-            rooms.add(room(floorIndex, startIndex + index, zones.get(index), fromX, y,
-                    actualWidth, length));
+        var half = round2(along / 2);
+        if (horizontal) {
+            bisectZone(new PlotGeometry.Rect(zone.x(), zone.y(), half, zone.length()), into);
+            bisectZone(new PlotGeometry.Rect(round2(zone.x() + half), zone.y(),
+                    round2(zone.width() - half), zone.length()), into);
+        } else {
+            bisectZone(new PlotGeometry.Rect(zone.x(), zone.y(), zone.width(), half), into);
+            bisectZone(new PlotGeometry.Rect(zone.x(), round2(zone.y() + half), zone.width(),
+                    round2(zone.length() - half)), into);
         }
     }
 
-    private List<String> roomProgram(int floorIndex, int bedroomCount) {
-        var program = new ArrayList<>(switch (floorIndex) {
-            case 1 -> List.of("FLEX_ROOM", "FAMILY_LOUNGE", "DRESSING_ROOM", "STUDY", "ATTACHED_BATHROOM",
-                    "STAIRCASE", "BATHROOM", "LAUNDRY");
-            default -> List.of("FLEX_ROOM", "MULTIPURPOSE_ROOM", "STORE", "HOME_OFFICE", "PRAYER_ROOM",
-                    "STAIRCASE", "BATHROOM", "LAUNDRY");
-        });
-        var bedroomSlots = List.of(0, 2, 3, 4);
-        for (var bedroom = 0; bedroom < bedroomCount && bedroom < bedroomSlots.size(); bedroom++) {
-            var slot = bedroomSlots.get(bedroom);
-            program.set(slot, floorIndex == 1 && bedroom == 0 ? "MASTER_BEDROOM" : "BEDROOM");
-        }
-        return List.copyOf(program);
-    }
 
     private boolean overlaps(RoomGeometry left, RoomGeometry right) {
         var epsilon = .01;
@@ -1114,6 +1261,16 @@ class GeometryEngine {
         return floor == null || floor.isBlank() ? "GROUND" : floor.toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * Places one door per room, choosing which wall it goes on the way a plan would.
+     *
+     * <p>A spanning tree over the shared walls is what keeps every room reachable and stops two
+     * doors appearing on one wall. Which tree, though, is the difference between a home and a maze:
+     * breadth-first order used to hang a bathroom door off whichever room happened to be reached
+     * first, so a family walked through a bedroom to reach the toilet. The tree is therefore grown
+     * cheapest-edge first against {@link #doorCost}, which prefers the passage for habitable rooms
+     * and the parent bedroom for a bathroom that belongs to it.</p>
+     */
     private List<Map<String, Object>> doorsFor(List<RoomGeometry> rooms, Facing roadFacing) {
         var doors = new ArrayList<Map<String, Object>>();
         for (var floor : rooms.stream().map(RoomGeometry::floor).distinct().toList()) {
@@ -1129,23 +1286,59 @@ class GeometryEngine {
             }
 
             var edges = sharedEdges(floorRooms);
-            var visited = new LinkedHashSet<String>();
-            var queue = new ArrayList<RoomGeometry>();
-            visited.add(root.id());
-            queue.add(root);
-            for (var cursor = 0; cursor < queue.size(); cursor++) {
-                var current = queue.get(cursor);
+            var connected = new LinkedHashSet<String>();
+            connected.add(root.id());
+            while (connected.size() < floorRooms.size()) {
+                SharedEdge best = null;
+                RoomGeometry bestFrom = null;
+                RoomGeometry bestTo = null;
+                var bestCost = Double.MAX_VALUE;
                 for (var edge : edges) {
-                    var adjacent = edge.other(current);
-                    if (adjacent == null || visited.contains(adjacent.id())) continue;
-                    doors.add(internalDoor(edge, current, adjacent,
-                            floorPrefixFor(floor) + "-D" + doorNumber++));
-                    visited.add(adjacent.id());
-                    queue.add(adjacent);
+                    var firstIn = connected.contains(edge.first().id());
+                    var secondIn = connected.contains(edge.second().id());
+                    if (firstIn == secondIn) continue;
+                    var from = firstIn ? edge.first() : edge.second();
+                    var to = firstIn ? edge.second() : edge.first();
+                    // A wider shared wall is the more natural place for a door, so it breaks ties
+                    // without ever outweighing the room-type preference itself.
+                    var cost = doorCost(from, to) - Math.min(edge.span(), 12) * .01;
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = edge;
+                        bestFrom = from;
+                        bestTo = to;
+                    }
                 }
+                if (best == null) break;
+                doors.add(internalDoor(best, bestFrom, bestTo,
+                        floorPrefixFor(floor) + "-D" + doorNumber++));
+                connected.add(bestTo.id());
             }
         }
         return List.copyOf(doors);
+    }
+
+    /**
+     * How willing a plan should be to reach {@code to} by cutting a door out of {@code from}.
+     *
+     * <p>Lower is better. The ordering encodes the circulation rules a drawing is read against: a
+     * private bathroom opens off the bedroom it serves, habitable rooms open off the passage, and
+     * nothing is entered through a bedroom or a parking bay if any other wall will do.</p>
+     */
+    private double doorCost(RoomGeometry from, RoomGeometry to) {
+        var fromType = from.type();
+        var toType = to.type();
+        if ("ATTACHED_BATHROOM".equals(toType)) {
+            if (fromType.endsWith("BEDROOM")) return 0;
+            return RoomSpec.CORRIDOR.equals(fromType) ? 40 : 30;
+        }
+        if ("ATTACHED_BATHROOM".equals(fromType)) return 60;
+        if (RoomSpec.CORRIDOR.equals(toType) || RoomSpec.CORRIDOR.equals(fromType)) return 5;
+        if (fromType.endsWith("BEDROOM")) return 35;
+        if (RoomSpec.isOutdoor(fromType)) return 25;
+        if ("LIVING_ROOM".equals(fromType) || "DINING".equals(fromType)
+                || "FAMILY_LOUNGE".equals(fromType)) return 10;
+        return 20;
     }
 
     private Map<String, Object> exteriorDoor(RoomGeometry room, Envelope envelope, Facing preferred,
@@ -1200,12 +1393,21 @@ class GeometryEngine {
                         .findFirst().orElse(rooms.getFirst()));
     }
 
+    /**
+     * Which room the front door should open into.
+     *
+     * <p>The living room comes first: a home is entered through its hall, and the porch or parking
+     * bay beside it is the approach rather than the threshold. Parking is still accepted when the
+     * plan puts nothing else on the road, which is what a plot too narrow for both leaves.</p>
+     */
     private int entrancePriority(RoomGeometry room) {
-        if (room.type().contains("PARKING")) return 0;
-        if (room.type().contains("LIVING")) return 1;
-        if (room.type().contains("BEDROOM")) return 2;
-        if (room.type().contains("DINING") || room.type().contains("KITCHEN")) return 3;
-        return 4;
+        if (room.type().contains("LIVING")) return 0;
+        if (room.type().contains("PARKING") || "PORCH".equals(room.type())) return 1;
+        if (room.type().contains("LOUNGE") || room.type().contains("DINING")) return 2;
+        if (RoomSpec.CORRIDOR.equals(room.type())) return 3;
+        if (room.type().contains("KITCHEN")) return 4;
+        if (room.type().contains("BEDROOM")) return 5;
+        return 6;
     }
 
     private List<SharedEdge> sharedEdges(List<RoomGeometry> rooms) {
@@ -1247,7 +1449,17 @@ class GeometryEngine {
         return null;
     }
 
-    private List<Map<String, Object>> windowsFor(List<RoomGeometry> rooms, List<Map<String, Object>> doors) {
+    /**
+     * Spaces a room can take light and air from across a shared wall.
+     *
+     * <p>These are the open spaces the plan carves inside itself, which is where a house built to
+     * its boundaries has to get its daylight from.</p>
+     */
+    private static final java.util.Set<String> LIGHT_WELLS =
+            java.util.Set.of("COURTYARD", "COURTYARD_PARKING", "OPEN_SPACE", "TERRACE", "BALCONY");
+
+    private List<Map<String, Object>> windowsFor(List<RoomGeometry> rooms,
+            List<Map<String, Object>> doors, java.util.Set<String> openSides) {
         var windows = new ArrayList<Map<String, Object>>();
         for (var floor : rooms.stream().map(RoomGeometry::floor).distinct().toList()) {
             var floorRooms = rooms.stream().filter(room -> floor.equals(room.floor())).toList();
@@ -1258,7 +1470,13 @@ class GeometryEngine {
                         || room.type().contains("LIFT") || room.type().contains("TERRACE")
                         || room.type().contains("BALCONY") || room.type().contains("COURTYARD")
                         || room.type().contains("OPEN_SPACE")) continue;
-                var sides = exteriorSides(room, envelope);
+                // A wall on the plot boundary has the neighbour's building against it, so the light
+                // has to come off the street or out of the plan's own courtyard instead.
+                var sides = new ArrayList<>(exteriorSides(room, envelope).stream()
+                        .filter(openSides::contains).toList());
+                lightWellSides(room, floorRooms).forEach(side -> {
+                    if (!sides.contains(side)) sides.add(side);
+                });
                 if (sides.isEmpty()) continue;
                 var window = exteriorWindow(room, sides, doors,
                         floorPrefixFor(floor) + "-W" + windowNumber);
@@ -1269,6 +1487,43 @@ class GeometryEngine {
             }
         }
         return List.copyOf(windows);
+    }
+
+    /** Walls of this room that face a courtyard, terrace or balcony on the same storey. */
+    private List<String> lightWellSides(RoomGeometry room, List<RoomGeometry> floorRooms) {
+        var sides = new ArrayList<String>();
+        for (var other : floorRooms) {
+            if (!LIGHT_WELLS.contains(other.type())) continue;
+            var edge = sharedEdge(room, other);
+            if (edge != null && !sides.contains(edge.orientationFrom(room))) {
+                sides.add(edge.orientationFrom(room));
+            }
+        }
+        return List.copyOf(sides);
+    }
+
+    /**
+     * Which compass sides of the building can carry an opening.
+     *
+     * <p>With open space all round, every wall is an outside wall.</p>
+     *
+     * <p>Building to the boundary is the other case, and it is how a street of city houses is
+     * built: the two flank walls stand on the plot line and the neighbours' houses come up against
+     * them, so they are party walls and carry nothing. The front and the back are the faces that
+     * stay in the open — the road on one side and whatever the plot backs onto on the other — and
+     * they are where a terraced house has always taken its light and air from.</p>
+     */
+    private java.util.Set<String> openSides(BuildableEnvelope envelope, Facing roadFacing) {
+        if (!envelope.setbacks().waived()) {
+            return java.util.Set.of("NORTH", "SOUTH", "EAST", "WEST");
+        }
+        var rear = switch (roadFacing) {
+            case NORTH -> Facing.SOUTH;
+            case SOUTH -> Facing.NORTH;
+            case EAST -> Facing.WEST;
+            case WEST -> Facing.EAST;
+        };
+        return java.util.Set.of(roadFacing.name(), rear.name());
     }
 
     private Map<String, Object> exteriorWindow(RoomGeometry room, List<String> sides,
@@ -1348,34 +1603,6 @@ class GeometryEngine {
         return Math.round(value * 100.0) / 100.0;
     }
 
-    /**
-     * Pre-snapped structural grid lines shared by every storey of one candidate.
-     *
-     * <p>All coordinates are already on the two-decimal grid that {@link RoomGeometry} records use,
-     * so a span derived as the difference of two lines needs no further rounding and adjacent rooms
-     * meet exactly. Deriving the core from this one grid is what keeps the stair and lift stack
-     * identical from floor to floor.</p>
-     */
-    private record FloorGrid(
-            double leftLine,
-            double coreX,
-            double middleSplit,
-            double coreMidLine,
-            double coreOuterLine,
-            double rightLine,
-            double topLine,
-            double topRowBottom,
-            double coreTop,
-            double buildingBottom
-    ) {
-        double coreWidth() {
-            return coreMidLine - coreX;
-        }
-
-        double coreLength() {
-            return buildingBottom - coreTop;
-        }
-    }
 
     private record Strategy(String key, String name, double columnSplit, double rowSplit,
             int vastuScore, int naturalLightScore, int spaceEfficiencyScore, List<String> explanations) {}

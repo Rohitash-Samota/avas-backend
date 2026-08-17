@@ -66,7 +66,8 @@ final class ProjectAggregate {
         if (envelope == null) {
             var boundary = details.boundary();
             envelope = BuildableEnvelope.derive(boundary,
-                    SetbackRule.assumedFor(boundary, details.floors()), details.floors());
+                    SetbackRule.forUsage(boundary, details.floors(), details.parameters().plotUsage()),
+                    details.floors());
         }
         return envelope;
     }

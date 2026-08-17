@@ -18,12 +18,38 @@ public record HomeParameters(
         boolean accessibleGroundFloor,
         @Min(0) @Max(6) int parkingCars,
         boolean solarReady,
-        boolean rainwaterHarvesting
+        boolean rainwaterHarvesting,
+        @Pattern(regexp = "FULL_PLOT|STANDARD_SETBACK|OPEN_SPACE") String plotUsage
 ) {
+    /**
+     * Build across the whole plot: no open-space ring, and the cars come indoors.
+     *
+     * <p>This is the AVAS default because it is what the plots we plan for are actually built to —
+     * but it is a customer instruction, not a compliance position. An envelope generated this way
+     * carries an explicit note that it will not satisfy the authority's open-space rule.</p>
+     */
+    public static final String FULL_PLOT = "FULL_PLOT";
+    /** Assumed front, rear and side setbacks, with open ground shown only where the finish pays for it. */
+    public static final String STANDARD_SETBACK = "STANDARD_SETBACK";
+    /** Assumed setbacks, with the ground they leave deliberately planned as garden and parking. */
+    public static final String OPEN_SPACE = "OPEN_SPACE";
+
     public HomeParameters {
         homeType = blankDefault(homeType, "DUPLEX");
         staircaseType = blankDefault(staircaseType, "DOG_LEGGED");
         liftProvision = blankDefault(liftProvision, "NONE");
+        plotUsage = blankDefault(plotUsage, FULL_PLOT);
+    }
+
+    /**
+     * Retains the pre-{@code plotUsage} arity so callers written before plot usage existed still
+     * compile. They resolve to the current default, exactly as an absent JSON field does.
+     */
+    public HomeParameters(String homeType, String staircaseType, String liftProvision, int balconyCount,
+            boolean terraceRequired, boolean courtyardRequired, boolean accessibleGroundFloor,
+            int parkingCars, boolean solarReady, boolean rainwaterHarvesting) {
+        this(homeType, staircaseType, liftProvision, balconyCount, terraceRequired, courtyardRequired,
+                accessibleGroundFloor, parkingCars, solarReady, rainwaterHarvesting, FULL_PLOT);
     }
 
     public static HomeParameters defaults(int floors, double plotArea, boolean seniorPresent,
@@ -40,7 +66,18 @@ public record HomeParameters(
                 seniorPresent,
                 plotArea >= 1_800 ? 2 : 1,
                 normalized.stream().anyMatch(value -> value.contains("solar")),
-                normalized.stream().anyMatch(value -> value.contains("rainwater")));
+                normalized.stream().anyMatch(value -> value.contains("rainwater")),
+                FULL_PLOT);
+    }
+
+    /** True when the home is planned across the entire plot outline, with no setback ring. */
+    public boolean usesFullPlot() {
+        return FULL_PLOT.equals(plotUsage);
+    }
+
+    /** True when the ground left outside the building is planned as garden rather than left over. */
+    public boolean plansOpenSpace() {
+        return OPEN_SPACE.equals(plotUsage);
     }
 
     private static String blankDefault(String value, String fallback) {

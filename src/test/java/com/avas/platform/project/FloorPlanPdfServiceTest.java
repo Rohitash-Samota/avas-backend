@@ -259,10 +259,27 @@ class FloorPlanPdfServiceTest {
         return details(40, 60, facing, floors);
     }
 
+    /**
+     * The shared brief, planned inside the assumed setback ring.
+     *
+     * <p>Pinned rather than left to the {@link HomeParameters#FULL_PLOT} product default because
+     * these sheets are asserted on the setback basis they print — a waived envelope has no
+     * assumption to cite.</p>
+     */
     private BasicDetailsRequest details(double width, double length, Facing facing, int floors) {
-        return new BasicDetailsRequest(width, length, facing, "Jaipur, Rajasthan", floors, 7_000_000,
-                Category.PREMIUM, new FamilyDetails(2, 2, 1, true),
+        var brief = new BasicDetailsRequest(width, length, facing, "Jaipur, Rajasthan", floors,
+                7_000_000, Category.PREMIUM, new FamilyDetails(2, 2, 1, true),
                 List.of("Vastu-friendly", "Family lounge", "Future expansion"));
+        // Every inferred parameter as the brief derived it, with only the plot usage overridden.
+        var inferred = brief.parameters();
+        return new BasicDetailsRequest(brief.plotWidth(), brief.plotLength(), brief.roadFacing(),
+                brief.city(), brief.floors(), brief.budget(), brief.category(), brief.family(),
+                brief.preferences(),
+                new HomeParameters(inferred.homeType(), inferred.staircaseType(),
+                        inferred.liftProvision(), inferred.balconyCount(), inferred.terraceRequired(),
+                        inferred.courtyardRequired(), inferred.accessibleGroundFloor(),
+                        inferred.parkingCars(), inferred.solarReady(), inferred.rainwaterHarvesting(),
+                        HomeParameters.STANDARD_SETBACK));
     }
 
     private DrawingCandidate groundOnly(DrawingCandidate source, boolean keepSchemaVersion) {

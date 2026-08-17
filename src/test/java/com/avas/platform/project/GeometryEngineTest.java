@@ -7,6 +7,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 class GeometryEngineTest {
     private final GeometryEngine engine = new GeometryEngine();
@@ -21,11 +22,14 @@ class GeometryEngineTest {
                     .containsExactly("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
             assertThat(candidates).allSatisfy(candidate -> {
                 var geometry = candidate.geometry();
-                assertThat(candidate.hardViolations()).isNotEmpty()
-                        .allMatch(value -> value.startsWith("Programme gap:"));
+                // Geometry, envelope and document rules must all pass. Anything left is a programme
+                // gap: something the brief asked for that this plot genuinely cannot carry.
+                assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
+                // Two storeys of this plate carry the whole brief; one storey cannot, and says so
+                // rather than drawing a bedroom nobody could sleep in.
                 assertThat(candidate.hardViolations())
-                        .contains("Programme gap: " + (floors == 1 ? 0 : 1)
-                                + " of 3 recommended attached bathrooms represented");
+                        .filteredOn(value -> value.contains("attached bathrooms represented"))
+                        .hasSize(floors == 1 ? 1 : 0);
                 var areaGap = "Programme gap: placed built-up area " + candidate.builtUpArea()
                         + " sq ft is outside recommended 2400-2800 sq ft cost basis";
                 if (candidate.builtUpArea() < 2400 * .98 || candidate.builtUpArea() > 2800 * 1.02) {
@@ -57,7 +61,8 @@ class GeometryEngineTest {
                             .hasSizeGreaterThanOrEqualTo(8);
                 }
                 assertThat(geometry.rooms().stream().filter(room -> room.type().contains("BEDROOM")))
-                        .hasSize(recommendation().bedrooms());
+                        .hasSizeBetween(floors == 1 ? 3 : recommendation().bedrooms(),
+                                recommendation().bedrooms());
                 assertThat(geometry.rooms()).anySatisfy(room -> {
                     assertThat(room.floor()).isEqualTo("GROUND");
                     assertThat(room.type()).isEqualTo("SENIOR_BEDROOM");
@@ -71,7 +76,7 @@ class GeometryEngineTest {
                 }
                 if (floors == 1) {
                     assertThat(geometry.rooms()).extracting(RoomGeometry::type)
-                            .contains("PARKING", "LIVING_ROOM", "DINING", "KITCHEN", "BATHROOM", "STORE")
+                            .contains("PARKING", "LIVING_ROOM", "KITCHEN", "BATHROOM", "CORRIDOR")
                             .doesNotContain("STAIRCASE", "LIFT_SHAFT");
                 }
                 assertThat(candidate.versions())
@@ -160,7 +165,8 @@ class GeometryEngineTest {
                 .anyMatch(value -> value.contains("invalid width"))
                 .anyMatch(value -> value.contains("not contained by the referenced room perimeter"))
                 .anyMatch(value -> value.contains("Duplicate door on shared room edge"))
-                .anyMatch(value -> value.contains("window") && value.contains("exterior building envelope"));
+                .anyMatch(value -> value.contains("window")
+                        && value.contains("neither the outside nor a light well"));
 
         var exteriorDoor = drawing.geometry().doors().stream()
                 .filter(opening -> opening.get("connectsRoomId") == null)
@@ -323,8 +329,9 @@ class GeometryEngineTest {
     void plotWithNoBuildableFootprintIsRejectedInsteadOfIgnoringSetbacks() {
         // A 10 ft frontage cannot absorb the assumed side setbacks. Packing rooms across the full
         // width anyway would silently produce an illegal layout, so generation must refuse.
-        var unbuildable = new BasicDetailsRequest(10, 180, Facing.NORTH, "Jaipur", 2, 7_000_000,
-                Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
+        var unbuildable = withPlotUsage(new BasicDetailsRequest(10, 180, Facing.NORTH, "Jaipur", 2,
+                7_000_000, Category.PREMIUM, new FamilyDetails(2, 2, 1, true),
+                List.of("Natural light")), HomeParameters.STANDARD_SETBACK);
 
         assertThatThrownBy(() -> engine.generate("unbuildable", 1, unbuildable, recommendation(), versions()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -378,7 +385,7 @@ class GeometryEngineTest {
     @Test
     void parksCarsOnTheApproachAndKeepsThatAreaOutOfTheBuiltUpTotal() {
         var parameters = new HomeParameters("DUPLEX", "DOG_LEGGED", "NONE", 1, false, false,
-                false, 2, false, false);
+                false, 2, false, false, HomeParameters.STANDARD_SETBACK);
         var details = new BasicDetailsRequest(50, 70, Facing.SOUTH, "Jaipur", 2, 9_000_000,
                 Category.LUXURY, new FamilyDetails(2, 2, 1, true), List.of("Garden"), parameters);
 
@@ -404,7 +411,7 @@ class GeometryEngineTest {
     @Test
     void leavesTheOpenGroundUnplannedWhenTheFinishDoesNotCarryIt() {
         var parameters = new HomeParameters("DUPLEX", "DOG_LEGGED", "NONE", 1, false, false,
-                false, 0, false, false);
+                false, 0, false, false, HomeParameters.STANDARD_SETBACK);
         var details = new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur", 2, 5_000_000,
                 Category.STANDARD, new FamilyDetails(2, 2, 0, false), List.of("Natural light"), parameters);
 
@@ -415,13 +422,250 @@ class GeometryEngineTest {
                 .noneMatch(element -> element.type().equals("OUTDOOR_PARKING"));
     }
 
+    @Test
+    void fullPlotUsageWaivesTheSetbackRingAndPlansNoOpenGround() {
+        var candidates = engine.generate("project-full", 1, details(40, 2, Facing.NORTH,
+                HomeParameters.FULL_PLOT), recommendation(), versions());
+
+        assertThat(candidates).isNotEmpty().allSatisfy(candidate -> {
+            var geometry = candidate.geometry();
+            assertThat(geometry.setbacks().source()).isEqualTo(SetbackRule.WAIVED);
+            assertThat(geometry.setbacks().maximum()).isZero();
+            // The buildable outline is the plot outline: there is no ring to inset by.
+            assertThat(geometry.buildableArea()).isEqualTo(geometry.plotArea());
+            assertThat(geometry.buildableOutline()).isEqualTo(geometry.plotOutline());
+            assertThat(geometry.siteElements()).isEmpty();
+            assertThat(candidate.versions()).containsEntry("plotUsage", HomeParameters.FULL_PLOT)
+                    .containsEntry("setbacksWaived", "true");
+            assertThat(candidate.softRecommendations())
+                    .anyMatch(note -> note.contains("open-space rule must be confirmed"));
+        });
+
+        // The point of the choice: more of the plot reaches the family as rooms.
+        var inset = engine.generate("project-inset", 1, details(40, 2, Facing.NORTH,
+                HomeParameters.STANDARD_SETBACK), recommendation(), versions());
+        assertThat(candidates.getFirst().builtUpArea())
+                .isGreaterThan(inset.getFirst().builtUpArea());
+    }
+
+    /** An L-shaped 50 x 60 plot with a 20 x 20 bite out of the north-east corner. */
+    private static PlotBoundary lShapedPlot() {
+        return new PlotBoundary(List.of(
+                PlotVertex.of(0, 0), PlotVertex.of(50, 0), PlotVertex.of(50, 40),
+                PlotVertex.of(30, 40), PlotVertex.of(30, 60), PlotVertex.of(0, 60)), Facing.SOUTH);
+    }
+
+    private BasicDetailsRequest irregularDetails(PlotBoundary plot, String plotUsage) {
+        var brief = new BasicDetailsRequest(plot.bounds().width(), plot.bounds().length(),
+                plot.roadFacing(), "Jaipur", 2, 9_000_000, Category.PREMIUM,
+                new FamilyDetails(2, 2, 1, true), List.of("Natural light"), null, plot);
+        return withPlotUsage(brief, plotUsage);
+    }
+
+    @Test
+    void fullPlotUsagePlansTheGroundTheInscribedRectangleCannotReach() {
+        var plot = lShapedPlot();
+        var inset = BuildableEnvelope.derive(plot, SetbackRule.none(), 2);
+
+        // The packer alone reaches only the largest rectangle inside the L.
+        assertThat(inset.footprintArea()).isLessThan(inset.plotArea() * .8);
+        // Extension zones recover the leg, so the whole plot becomes plannable.
+        assertThat(inset.extensionZones()).isNotEmpty();
+        assertThat(inset.plannableArea()).isEqualTo(inset.plotArea());
+        assertThat(inset.notes()).anyMatch(note -> note.contains("extension zone"));
+
+        var candidate = engine.generate("l-shaped", 1, irregularDetails(plot, HomeParameters.FULL_PLOT),
+                recommendation(), versions(), null, inset).getFirst();
+        var ground = candidate.geometry().rooms().stream()
+                .filter(room -> "GROUND".equals(room.floor())).toList();
+
+        // Rooms stand in the leg, and every one of them is still a rectangle inside the outline.
+        assertThat(ground).anyMatch(room -> room.y() >= 40);
+        assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
+        assertThat(engine.validateEnvelope(inset, candidate.geometry().rooms())).isEmpty();
+        // Every storey carries the leg; one that stopped short would overhang open air.
+        assertThat(candidate.geometry().rooms()).filteredOn(room -> "FIRST".equals(room.floor()))
+                .anyMatch(room -> room.y() >= 40);
+    }
+
+    @Test
+    void groundTooNarrowForARoomBecomesDepthOnTheRoomsFacingIt() {
+        // The leftover leg here is 5 ft wide: never a room, but real floor the customer asked for.
+        var plot = new PlotBoundary(List.of(
+                PlotVertex.of(0, 0), PlotVertex.of(40, 0), PlotVertex.of(40, 40),
+                PlotVertex.of(35, 40), PlotVertex.of(35, 60), PlotVertex.of(0, 60)), Facing.SOUTH);
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.none(), 2);
+        assertThat(envelope.extensionZones())
+                .anyMatch(zone -> Math.min(zone.width(), zone.length()) < 7);
+
+        var candidate = engine.generate("narrow-leg", 1,
+                irregularDetails(plot, HomeParameters.FULL_PLOT), recommendation(), versions(),
+                null, envelope).getFirst();
+        var ground = candidate.geometry().rooms().stream()
+                .filter(room -> "GROUND".equals(room.floor())).toList();
+
+        // Rooms reached the boundary the strip ran along, without leaving the plot to do it.
+        assertThat(ground).anyMatch(room -> Math.abs(room.x() + room.width() - 40) < .05);
+        assertThat(engine.validateEnvelope(envelope, candidate.geometry().rooms())).isEmpty();
+        // A room whose wall the strip only partly covered stayed where it was, so nothing overlaps.
+        assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
+    }
+
+    @Test
+    void slantedBoundariesKeepTheirMarginRatherThanSteppingRoomsAlongIt() {
+        // Tapered plot: both long edges run diagonally, and no rectangle can follow them.
+        var plot = new PlotBoundary(List.of(PlotVertex.of(0, 0), PlotVertex.of(40, 0),
+                PlotVertex.of(32, 60), PlotVertex.of(8, 60)), Facing.SOUTH);
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.none(), 2);
+
+        // Narrow strips beside a diagonal would land at stepped depths, so they are not taken.
+        assertThat(envelope.extensionZones())
+                .allMatch(zone -> Math.min(zone.width(), zone.length()) >= 7);
+    }
+
+    /**
+     * A tapered plot is the case rectangles alone cannot finish: the packed rectangle reaches only
+     * three quarters of it, and the rest is two wedges down the sides.
+     */
+    @Test
+    void roomsAgainstASlantedBoundaryFollowItSoTheWholePlotIsUsed() {
+        var plot = new PlotBoundary(List.of(PlotVertex.of(0, 0), PlotVertex.of(40, 0),
+                PlotVertex.of(32, 60), PlotVertex.of(8, 60)), Facing.SOUTH);
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.none(), 2);
+        assertThat(envelope.footprintArea()).isLessThan(envelope.plotArea() * .8);
+
+        var candidate = engine.generate("tapered", 1,
+                irregularDetails(plot, HomeParameters.FULL_PLOT), recommendation(), versions(),
+                null, envelope).getFirst();
+        var ground = candidate.geometry().rooms().stream()
+                .filter(room -> "GROUND".equals(room.floor())).toList();
+
+        // The storey now covers the plot, and nothing crosses the boundary to do it.
+        assertThat(ground.stream().mapToDouble(RoomGeometry::area).sum())
+                .isCloseTo(envelope.plotArea(), within(1d));
+        assertThat(engine.validateEnvelope(envelope, candidate.geometry().rooms())).isEmpty();
+        assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
+
+        var shaped = ground.stream().filter(RoomGeometry::shaped).toList();
+        assertThat(shaped).isNotEmpty();
+        assertThat(shaped).allSatisfy(room -> {
+            // Counter-clockwise, which is what the massing view reads wall directions from.
+            assertThat(PlotGeometry.signedArea(room.outline())).isPositive();
+            // The bounding box still describes the room, and the area is the room's own, not the box.
+            var box = PlotGeometry.bounds(room.outline());
+            assertThat(room.x()).isCloseTo(box.minimumX(), within(.02));
+            assertThat(room.y()).isCloseTo(box.minimumY(), within(.02));
+            assertThat(room.area()).isLessThan(room.width() * room.length());
+            assertThat(room.outline()).hasSizeGreaterThanOrEqualTo(3);
+            // No corner repeats the one before it, so no wall has zero length.
+            for (var index = 0; index < room.outline().size(); index++) {
+                var corner = room.outline().get(index);
+                var next = room.outline().get((index + 1) % room.outline().size());
+                assertThat(Math.hypot(corner.x() - next.x(), corner.y() - next.y()))
+                        .as("zero-length wall in %s", room.id()).isGreaterThan(.01);
+            }
+        });
+    }
+
+    /**
+     * A house on its boundaries is a terraced house: the flank walls are shared with the plots
+     * either side, so nothing opens through them.
+     */
+    @Test
+    void buildingToTheBoundaryPutsWindowsOnlyOnTheRoadAndRearWalls() {
+        var candidate = engine.generate("terraced", 1, details(40, 2, Facing.NORTH,
+                HomeParameters.FULL_PLOT), recommendation(), versions()).getFirst();
+        var geometry = candidate.geometry();
+        var roomsById = geometry.rooms().stream()
+                .collect(java.util.stream.Collectors.toMap(RoomGeometry::id, room -> room));
+
+        assertThat(geometry.windows()).isNotEmpty();
+        assertThat(geometry.windows()).allSatisfy(window -> {
+            var orientation = String.valueOf(window.get("orientation"));
+            var room = roomsById.get(String.valueOf(window.get("roomId")));
+            var onFloor = geometry.rooms().stream()
+                    .filter(other -> java.util.Objects.equals(other.floor(), room.floor())).toList();
+            var envelope = envelopeOf(onFloor);
+            var onFlank = ("EAST".equals(orientation)
+                            && Math.abs(room.x() + room.width() - envelope[1]) <= .02)
+                    || ("WEST".equals(orientation) && Math.abs(room.x() - envelope[0]) <= .02);
+            // A flank opening is only ever a party wall here, since the building fills the plot.
+            assertThat(onFlank)
+                    .as("window %s opens through the party wall on the %s boundary",
+                            window.get("id"), orientation)
+                    .isFalse();
+        });
+
+        assertThat(candidate.softRecommendations())
+                .anyMatch(note -> note.contains("party walls"));
+        // Openings are still validated, so nothing was bought by loosening the rule.
+        assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
+    }
+
+    /** Minimum and maximum x of one storey, as {minX, maxX}. */
+    private static double[] envelopeOf(List<RoomGeometry> rooms) {
+        return new double[] {
+                rooms.stream().mapToDouble(RoomGeometry::x).min().orElse(0),
+                rooms.stream().mapToDouble(room -> room.x() + room.width()).max().orElse(0)};
+    }
+
+    @Test
+    void squarePlotsKeepEveryRoomRectangular() {
+        var candidate = engine.generate("square", 1, details(40, 2, Facing.NORTH,
+                HomeParameters.FULL_PLOT), recommendation(), versions()).getFirst();
+
+        // Nothing to follow, so no room carries an outline and every consumer reads the rectangle.
+        assertThat(candidate.geometry().rooms()).noneMatch(RoomGeometry::shaped);
+    }
+
+    @Test
+    void openSpaceUsageDrawsAGardenTheFinishTierWouldNotHaveBought() {
+        var parameters = new HomeParameters("DUPLEX", "DOG_LEGGED", "NONE", 1, false, false,
+                false, 1, false, false, HomeParameters.OPEN_SPACE);
+        var details = new BasicDetailsRequest(50, 70, Facing.SOUTH, "Jaipur", 2, 5_000_000,
+                Category.STANDARD, new FamilyDetails(2, 2, 0, false), List.of("Garden"), parameters);
+
+        var candidate = engine.generate("project-open", 1, details, recommendation(), versions())
+                .getFirst();
+
+        assertThat(candidate.geometry().setbacks().assumed()).isTrue();
+        assertThat(candidate.geometry().siteElements())
+                .anyMatch(element -> element.type().equals("GARDEN"));
+    }
+
     private BasicDetailsRequest details(double width, int floors) {
         return details(width, floors, Facing.NORTH);
     }
 
+    /**
+     * The shared brief, planned inside the assumed setback ring.
+     *
+     * <p>Plot usage is pinned rather than left to default because these expectations — which
+     * programme gaps a plate of this size produces, where the open ground goes — are calibrated
+     * against the setback envelope. {@link HomeParameters#FULL_PLOT} is the product default and is
+     * covered by its own tests.</p>
+     */
     private BasicDetailsRequest details(double width, int floors, Facing facing) {
-        return new BasicDetailsRequest(width, 60, facing, "Jaipur", floors, 7_000_000,
-                Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light"));
+        return details(width, floors, facing, HomeParameters.STANDARD_SETBACK);
+    }
+
+    private BasicDetailsRequest details(double width, int floors, Facing facing, String plotUsage) {
+        return withPlotUsage(new BasicDetailsRequest(width, 60, facing, "Jaipur", floors, 7_000_000,
+                Category.PREMIUM, new FamilyDetails(2, 2, 1, true), List.of("Natural light")),
+                plotUsage);
+    }
+
+    /** The same brief with every inferred parameter intact and only the plot usage overridden. */
+    private static BasicDetailsRequest withPlotUsage(BasicDetailsRequest brief, String plotUsage) {
+        var inferred = brief.parameters();
+        return new BasicDetailsRequest(brief.plotWidth(), brief.plotLength(), brief.roadFacing(),
+                brief.city(), brief.floors(), brief.budget(), brief.category(), brief.family(),
+                brief.preferences(),
+                new HomeParameters(inferred.homeType(), inferred.staircaseType(),
+                        inferred.liftProvision(), inferred.balconyCount(), inferred.terraceRequired(),
+                        inferred.courtyardRequired(), inferred.accessibleGroundFloor(),
+                        inferred.parkingCars(), inferred.solarReady(), inferred.rainwaterHarvesting(),
+                        plotUsage));
     }
 
     private Recommendation recommendation() {

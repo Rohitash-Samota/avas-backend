@@ -16,6 +16,49 @@ class ProjectServiceTest {
         service = new ProjectService(geometry, "RJ-JDA-2026.08", "AVAS-KB-2026.08", "layout-heuristic-1.5.0", "planning-estimate-1.2.0");
     }
 
+    /**
+     * The product default: the home is planned across the whole plot.
+     *
+     * <p>Pinned here because the consequences run the length of the workflow. The envelope keeps no
+     * open space, so the footprint is the plot and the built-up target rises with it; the same
+     * budget then buys a larger house at a lower inferred finish tier, and every drawing has to say
+     * the layout is not approvable as drawn.</p>
+     */
+    @Test
+    void fullPlotUsageBuildsTheWholePlotAndSpreadsTheBudgetThinner() {
+        var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        service.updateBasicDetails(project.id(), details(HomeParameters.FULL_PLOT), "INDIVIDUAL");
+        var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
+
+        var setback = service.create(new CreateProjectRequest("Same brief", StartMode.PLOT), "INDIVIDUAL");
+        service.updateBasicDetails(setback.id(), details(HomeParameters.STANDARD_SETBACK), "INDIVIDUAL");
+        var inset = service.generateRecommendation(setback.id(), "INDIVIDUAL");
+
+        // The whole 40 x 60 plot, rather than the rectangle the assumed ring leaves inside it.
+        assertThat(recommendation.builtUpAreaMinimum()).isGreaterThan(inset.builtUpAreaMinimum());
+        // Same budget over more floor: the finish the server can stand behind drops a tier.
+        assertThat(inset.category()).isEqualTo("PREMIUM");
+        assertThat(recommendation.category()).isEqualTo("STANDARD");
+
+        service.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        service.generateDrawings(project.id(), "INDIVIDUAL");
+        assertThat(service.drawings(project.id())).isNotEmpty().allSatisfy(drawing -> {
+            var geometry = drawing.geometry();
+            assertThat(geometry.setbacks().front()).isZero();
+            assertThat(geometry.setbacks().rear()).isZero();
+            assertThat(geometry.setbacks().side()).isZero();
+            assertThat(geometry.setbacks().source()).isEqualTo(SetbackRule.WAIVED);
+            assertThat(geometry.buildableArea()).isEqualTo(geometry.plotArea());
+            // Nothing is planned outside the building, so the cars are planned inside it.
+            assertThat(geometry.siteElements()).isEmpty();
+            assertThat(geometry.rooms()).anyMatch(room -> room.type().contains("PARKING"));
+            assertThat(drawing.softRecommendations())
+                    .anyMatch(note -> note.contains("open-space rule must be confirmed"))
+                    .anyMatch(note -> note.contains("party walls"));
+            assertThat(drawing.versions()).containsEntry("plotUsage", HomeParameters.FULL_PLOT);
+        });
+    }
+
     @Test
     void sharesRoomsTwoToAFamilyMemberAndKeepsTheSeniorOnTheGroundFloor() {
         var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
@@ -177,7 +220,30 @@ class ProjectServiceTest {
                         || event.action().equals("ESTIMATE_AUTO_GENERATED"));
     }
 
+    /**
+     * The shared brief, planned inside the assumed setback ring.
+     *
+     * <p>Pinned rather than left to the {@link HomeParameters#FULL_PLOT} product default because the
+     * inferred finish tier here is budget over built-up area: full plot usage spreads the same
+     * budget across a much larger house and lands on a different tier, which
+     * {@link #fullPlotUsageBuildsTheWholePlotAndSpreadsTheBudgetThinner()} covers directly.</p>
+     */
     private BasicDetailsRequest details() {
-        return new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur, Rajasthan", 2, 7_000_000, Category.NOT_SURE, new FamilyDetails(2, 2, 1, true), List.of("Vastu-friendly", "Family lounge", "Future expansion"));
+        return details(HomeParameters.STANDARD_SETBACK);
+    }
+
+    private BasicDetailsRequest details(String plotUsage) {
+        var brief = new BasicDetailsRequest(40, 60, Facing.NORTH, "Jaipur, Rajasthan", 2, 7_000_000, Category.NOT_SURE, new FamilyDetails(2, 2, 1, true), List.of("Vastu-friendly", "Family lounge", "Future expansion"));
+        return new BasicDetailsRequest(brief.plotWidth(), brief.plotLength(), brief.roadFacing(),
+                brief.city(), brief.floors(), brief.budget(), brief.category(), brief.family(),
+                brief.preferences(), withPlotUsage(brief.parameters(), plotUsage));
+    }
+
+    /** Every inferred parameter as the brief derived it, with only the plot usage overridden. */
+    private static HomeParameters withPlotUsage(HomeParameters source, String plotUsage) {
+        return new HomeParameters(source.homeType(), source.staircaseType(), source.liftProvision(),
+                source.balconyCount(), source.terraceRequired(), source.courtyardRequired(),
+                source.accessibleGroundFloor(), source.parkingCars(), source.solarReady(),
+                source.rainwaterHarvesting(), plotUsage);
     }
 }

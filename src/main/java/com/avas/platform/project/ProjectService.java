@@ -457,7 +457,7 @@ public class ProjectService {
         // Target the same footprint the geometry engine will pack into, so a candidate is never
         // measured against an area the envelope could not have produced.
         var builtUp = (int) Math.round(
-                project.envelope().footprintArea() * (d.floors() - GROUND_FLOOR_OUTDOOR_SHARE));
+                project.envelope().plannableArea() * (d.floors() - GROUND_FLOOR_OUTDOOR_SHARE));
         var category = d.category() == Category.NOT_SURE ? (d.budget() / Math.max(1, builtUp) >= 3000 ? "LUXURY" : d.budget() / Math.max(1, builtUp) >= 2200 ? "PREMIUM" : "STANDARD") : d.category().name();
         var rate = switch (category) { case "LUXURY" -> 3300; case "PREMIUM" -> 2600; default -> 1950; };
         var expected = (long) builtUp * rate;
