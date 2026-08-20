@@ -638,6 +638,105 @@ class GeometryEngineTest {
     }
 
     /**
+     * The setback options use their whole envelope too, not just the largest rectangle inside it.
+     *
+     * <p>On an L-shaped plot the packed rectangle reached barely two thirds of the ground the
+     * setback rule actually left buildable, and the rest was drawn as lawn. The open-space choices
+     * are about the ring the rule holds back; the area inside it belongs to the customer whether or
+     * not one rectangle happens to cover it.</p>
+     */
+    @Test
+    void setbackEnvelopesPlanTheBuildableGroundOneRectangleCannotReach() {
+        var plot = lShapedPlot();
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.assumedFor(plot, 2), 2);
+
+        assertThat(envelope.setbacks().waived()).isFalse();
+        // Ground inside the setback line that the inscribed rectangle leaves standing empty.
+        assertThat(envelope.footprintArea()).isLessThan(envelope.buildableArea() * .8);
+        assertThat(envelope.extensionZones()).isNotEmpty();
+        assertThat(envelope.plannableArea()).isCloseTo(envelope.buildableArea(), within(1d));
+        assertThat(envelope.underUsesEnvelope()).isFalse();
+
+        var candidate = engine.generate("l-shaped-setback", 1,
+                irregularDetails(plot, HomeParameters.STANDARD_SETBACK), recommendation(), versions(),
+                null, envelope).getFirst();
+        var rooms = candidate.geometry().rooms();
+
+        assertThat(engine.validate(50, 60, rooms)).isEmpty();
+        // Nothing crossed the setback line to get there.
+        assertThat(engine.validateEnvelope(envelope, rooms)).isEmpty();
+        assertThat(rooms).filteredOn(room -> "GROUND".equals(room.floor()))
+                .anyMatch(room -> room.x() >= envelope.footprintX() + envelope.footprintWidth() - .05
+                        || room.y() >= envelope.footprintY() + envelope.footprintLength() - .05);
+        // The ring is still open ground, and only the ring.
+        assertThat(candidate.geometry().siteElements()).allSatisfy(element ->
+                assertThat(rooms).filteredOn(room -> "GROUND".equals(room.floor()))
+                        .noneMatch(room -> element.x() < room.x() + room.width() - .01
+                                && element.x() + element.width() > room.x() + .01
+                                && element.y() < room.y() + room.length() - .01
+                                && element.y() + element.length() > room.y() + .01));
+    }
+
+    /** A tapered plot's setback line is slanted too, and rooms follow it rather than stopping square. */
+    @Test
+    void roomsFollowASlantedSetbackLineWithoutCrossingIt() {
+        var plot = new PlotBoundary(List.of(PlotVertex.of(0, 0), PlotVertex.of(40, 0),
+                PlotVertex.of(32, 60), PlotVertex.of(8, 60)), Facing.SOUTH);
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.assumedFor(plot, 2), 2);
+        assertThat(envelope.slanted()).isTrue();
+        assertThat(envelope.footprintArea()).isLessThan(envelope.buildableArea() * .8);
+
+        var candidate = engine.generate("tapered-setback", 1,
+                irregularDetails(plot, HomeParameters.STANDARD_SETBACK), recommendation(), versions(),
+                null, envelope).getFirst();
+        var ground = candidate.geometry().rooms().stream()
+                .filter(room -> "GROUND".equals(room.floor())).toList();
+
+        assertThat(ground.stream().mapToDouble(RoomGeometry::area).sum())
+                .isCloseTo(envelope.buildableArea(), within(1d));
+        assertThat(engine.validateEnvelope(envelope, candidate.geometry().rooms())).isEmpty();
+        assertThat(engine.validate(40, 60, candidate.geometry().rooms())).isEmpty();
+    }
+
+    /**
+     * A plot whose slant leaves ground two rooms can both reach, which is where the boundary pass
+     * used to draw the second one straight through the first.
+     *
+     * <p>The corner-cut plot in the screenshots: a forty by sixty with the south-east corner taken
+     * off. The upper storey's balcony had open plot to its east and to its north, so it claimed both
+     * and came back a wedge four times the size a balcony is planned at — over the two extension
+     * rooms already standing there.</p>
+     */
+    @Test
+    void roomsFollowingASlantedBoundaryNeverClaimTheSameGroundTwice() {
+        var plot = new PlotBoundary(List.of(
+                PlotVertex.of(0, 0), PlotVertex.of(40, 0), PlotVertex.of(40, 33),
+                PlotVertex.of(22, 60), PlotVertex.of(0, 60)), Facing.NORTH);
+        var envelope = BuildableEnvelope.derive(plot, SetbackRule.none(), 2);
+
+        var candidates = engine.generate("corner-cut", 1,
+                irregularDetails(plot, HomeParameters.FULL_PLOT), recommendation(), versions(),
+                null, envelope);
+
+        assertThat(candidates).isNotEmpty().allSatisfy(candidate -> {
+            var rooms = candidate.geometry().rooms();
+            assertThat(engine.validate(40, 60, rooms))
+                    .withFailMessage("rooms overlap or leave the plot: %s", engine.validate(40, 60, rooms))
+                    .isEmpty();
+            assertThat(engine.validateEnvelope(envelope, rooms)).isEmpty();
+            // The point of full plot usage: both storeys still reach the whole outline.
+            for (var floor : List.of("GROUND", "FIRST")) {
+                assertThat(rooms.stream().filter(room -> floor.equals(room.floor()))
+                        .mapToDouble(RoomGeometry::area).sum())
+                        .isCloseTo(envelope.plotArea(), within(1d));
+            }
+            // A balcony is a planned size, not whatever ground happens to be left over beside it.
+            assertThat(rooms).filteredOn(room -> "BALCONY".equals(room.type()))
+                    .allSatisfy(room -> assertThat(room.area()).isLessThan(120d));
+        });
+    }
+
+    /**
      * The shared brief, planned inside the assumed setback ring.
      *
      * <p>Plot usage is pinned rather than left to default because these expectations — which

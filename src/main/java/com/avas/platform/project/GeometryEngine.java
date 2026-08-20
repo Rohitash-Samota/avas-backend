@@ -96,7 +96,11 @@ class GeometryEngine {
             var rooms = extensionRooms(envelope, planner.planBuilding(), details.floors());
             // A slanted boundary is the one edge rectangles cannot reach, so the rooms standing
             // against it take the boundary's own line. Square plots are already flush against it.
-            if (envelope.setbacks().waived() && envelope.slanted()) {
+            // The line followed is the buildable outline, so this recovers the wedge inside the
+            // setback ring without ever crossing it — which is why it is not reserved for the
+            // waived case: a tapered plot with setbacks was leaving a quarter of its legal area
+            // unbuilt for want of a wall that is not at right angles.
+            if (envelope.slanted()) {
                 rooms = followBoundary(rooms, envelope.buildableOutline());
             }
             var doors = doorsFor(rooms, details.roadFacing());
@@ -308,6 +312,10 @@ class GeometryEngine {
     private static final double CAR_WIDTH = 8.5d;
     /** Below this a strip of open ground is a margin, not somewhere a family would put anything. */
     private static final double USABLE_OPEN_DEPTH = 6d;
+    /** Shortest side of open ground worth recovering as a named site element, in feet. */
+    private static final double MINIMUM_OPEN_SIDE = 3d;
+    /** Floor area below which open ground is margin rather than something to draw. */
+    private static final double MINIMUM_OPEN_AREA = 30d;
 
     /**
      * Plans the open ground: where the cars stand, and what the rest of the plot becomes.
@@ -331,48 +339,42 @@ class GeometryEngine {
         if (parameters.usesFullPlot()) {
             return List.of();
         }
-        var plot = PlotGeometry.bounds(envelope.plot().vertices());
+        var open = openGround(envelope);
+        if (open.isEmpty()) {
+            return List.of();
+        }
         var elements = new ArrayList<SiteElement>();
-        var footprintX = envelope.footprintX();
-        var footprintY = envelope.footprintY();
-        var footprintRight = footprintX + envelope.footprintWidth();
-        var footprintTop = footprintY + envelope.footprintLength();
-
-        // The four strips of open ground the building leaves, keyed by the compass edge they sit on.
-        var strips = new java.util.LinkedHashMap<Facing, double[]>();
-        strips.put(Facing.SOUTH, new double[] {plot.minimumX(), plot.minimumY(),
-                plot.width(), footprintY - plot.minimumY()});
-        strips.put(Facing.NORTH, new double[] {plot.minimumX(), footprintTop,
-                plot.width(), plot.maximumY() - footprintTop});
-        strips.put(Facing.WEST, new double[] {plot.minimumX(), plot.minimumY(),
-                footprintX - plot.minimumX(), plot.length()});
-        strips.put(Facing.EAST, new double[] {footprintRight, plot.minimumY(),
-                plot.maximumX() - footprintRight, plot.length()});
-
-        var approach = strips.get(facing);
         var horizontalApproach = facing == Facing.NORTH || facing == Facing.SOUTH;
-        var approachDepth = horizontalApproach ? approach[3] : approach[2];
-        var approachRun = horizontalApproach ? approach[2] : approach[3];
-        // A front setback is usually shallower than a car is long, which is why so many Indian homes
-        // park along the boundary rather than nose-in. Both are real arrangements, so the depth that
-        // is actually available chooses between them instead of ruling parking out.
-        var noseIn = approachDepth >= CAR_LENGTH;
-        var bayDepth = noseIn ? CAR_LENGTH : CAR_WIDTH;
-        var runPerCar = noseIn ? CAR_WIDTH : CAR_LENGTH;
-        if (parameters.parkingCars() > 0 && approachDepth >= CAR_WIDTH) {
-            var parkedOutside = Math.min(parameters.parkingCars(),
-                    (int) Math.floor(approachRun / runPerCar));
+        // The approach is the largest piece of open ground on the road side, because that is the
+        // only ground a car can reach from the street.
+        var approach = open.stream().filter(piece -> onRoadSide(envelope, piece, facing))
+                .max(java.util.Comparator.comparingDouble(PlotGeometry.Rect::area)).orElse(null);
+        if (approach != null && parameters.parkingCars() > 0) {
+            var approachDepth = horizontalApproach ? approach.length() : approach.width();
+            var approachRun = horizontalApproach ? approach.width() : approach.length();
+            // A front setback is usually shallower than a car is long, which is why so many Indian
+            // homes park along the boundary rather than nose-in. Both are real arrangements, so the
+            // depth that is actually available chooses between them instead of ruling parking out.
+            var noseIn = approachDepth >= CAR_LENGTH;
+            var bayDepth = noseIn ? CAR_LENGTH : CAR_WIDTH;
+            var runPerCar = noseIn ? CAR_WIDTH : CAR_LENGTH;
+            var parkedOutside = approachDepth < CAR_WIDTH ? 0
+                    : Math.min(parameters.parkingCars(), (int) Math.floor(approachRun / runPerCar));
             if (parkedOutside > 0) {
                 var bayRun = parkedOutside * runPerCar;
                 var label = parkedOutside + " car open parking";
                 if (horizontalApproach) {
-                    var bayY = facing == Facing.SOUTH ? approach[1] + approach[3] - bayDepth : approach[1];
+                    // Hard against the house, so what is left of the approach is driveway rather
+                    // than a bay stranded at the boundary with a car's length of nothing behind it.
+                    var bayY = facing == Facing.SOUTH
+                            ? approach.y() + approach.length() - bayDepth : approach.y();
                     elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
-                            approach[0] + (approach[2] - bayRun) / 2, bayY, bayRun, bayDepth));
+                            approach.x() + (approach.width() - bayRun) / 2, bayY, bayRun, bayDepth));
                 } else {
-                    var bayX = facing == Facing.WEST ? approach[0] + approach[2] - bayDepth : approach[0];
+                    var bayX = facing == Facing.WEST
+                            ? approach.x() + approach.width() - bayDepth : approach.x();
                     elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
-                            bayX, approach[1] + (approach[3] - bayRun) / 2, bayDepth, bayRun));
+                            bayX, approach.y() + (approach.length() - bayRun) / 2, bayDepth, bayRun));
                 }
             }
         }
@@ -380,22 +382,42 @@ class GeometryEngine {
         // Garden is a finish-tier promise, so it is only drawn where the specification carries it —
         // or where the customer asked for the open ground to be planned, which buys it at any tier.
         if (parameters.plansOpenSpace() || category == Category.LUXURY || category == Category.PREMIUM) {
-            var opposite = switch (facing) {
-                case NORTH -> Facing.SOUTH;
-                case SOUTH -> Facing.NORTH;
-                case EAST -> Facing.WEST;
-                case WEST -> Facing.EAST;
-            };
-            for (var edge : List.of(opposite, Facing.EAST, Facing.WEST, Facing.NORTH, Facing.SOUTH)) {
-                if (edge == facing || elements.stream().anyMatch(e -> e.type().equals("GARDEN"))) continue;
-                var strip = strips.get(edge);
-                var depth = edge == Facing.NORTH || edge == Facing.SOUTH ? strip[3] : strip[2];
-                if (depth < USABLE_OPEN_DEPTH) continue;
-                elements.add(SiteElement.of("site-garden", "GARDEN", "Garden",
-                        strip[0], strip[1], strip[2], strip[3]));
-            }
+            open.stream()
+                    .filter(piece -> piece != approach)
+                    .filter(piece -> Math.min(piece.width(), piece.length()) >= USABLE_OPEN_DEPTH)
+                    .max(java.util.Comparator.comparingDouble(PlotGeometry.Rect::area))
+                    .ifPresent(piece -> elements.add(SiteElement.of("site-garden", "GARDEN", "Garden",
+                            piece.x(), piece.y(), piece.width(), piece.length())));
         }
         return List.copyOf(elements);
+    }
+
+    /**
+     * The ground on this plot no room is standing on.
+     *
+     * <p>Taken from the plot the same way the extension zones were taken from the envelope, rather
+     * than as the four bands around the packed rectangle. Those bands were open ground only while
+     * the packed rectangle was the whole building; once the planner also took the leg of an L-shaped
+     * plot, the band beside it still read as empty and a lawn was drawn straight over the rooms
+     * standing in it.</p>
+     */
+    private List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope) {
+        var built = new ArrayList<PlotGeometry.Rect>();
+        built.add(new PlotGeometry.Rect(envelope.footprintX(), envelope.footprintY(),
+                envelope.footprintWidth(), envelope.footprintLength()));
+        built.addAll(envelope.extensionZones());
+        return PlotGeometry.residualRectangles(envelope.plot().vertices(), built,
+                MINIMUM_OPEN_SIDE, MINIMUM_OPEN_AREA);
+    }
+
+    /** True when this piece of open ground lies between the building and the road. */
+    private boolean onRoadSide(BuildableEnvelope envelope, PlotGeometry.Rect piece, Facing facing) {
+        return switch (facing) {
+            case NORTH -> piece.y() >= envelope.footprintY() + envelope.footprintLength() - GAP;
+            case SOUTH -> piece.y() + piece.length() <= envelope.footprintY() + GAP;
+            case EAST -> piece.x() >= envelope.footprintX() + envelope.footprintWidth() - GAP;
+            case WEST -> piece.x() + piece.width() <= envelope.footprintX() + GAP;
+        };
     }
 
     private boolean countsAsBuiltUp(RoomGeometry room) {
@@ -1099,27 +1121,36 @@ class GeometryEngine {
      * is exactly the plot clipped to its frontage, slant included, which is the shape an architect
      * would draw and the only one that reaches the corner.</p>
      *
-     * <p>A room only takes ground no other room is standing on, so extending is never a room
-     * growing over its neighbour. Rooms with nothing but plot beyond them are the ones that
-     * move; everything behind them stays the rectangle it was.</p>
+     * <p>Rooms with nothing but plot beyond them are the ones that move; everything behind them
+     * stays the rectangle it was. Ground is claimed one room at a time and a claim is withdrawn from
+     * anything already standing on it, because on a cut corner the same wedge lies beyond two rooms
+     * at once and checking only who stands there now let both of them take all of it — which drew
+     * the second room straight through the first.</p>
      */
     private List<RoomGeometry> followBoundary(List<RoomGeometry> rooms, List<PlotVertex> plot) {
         var bounds = PlotGeometry.bounds(plot);
-        var shaped = new ArrayList<RoomGeometry>(rooms.size());
-        for (var room : rooms) {
-            var others = rooms.stream()
+        // What every room stands on right now. A room that has already taken its share of the margin
+        // is entered here as the shape it took, so the next room reaching for the same ground finds
+        // it occupied instead of being drawn straight through it.
+        var settled = new LinkedHashMap<String, RoomGeometry>();
+        rooms.forEach(room -> settled.put(room.id(), room));
+        for (var room : claimOrder(rooms)) {
+            var others = settled.values().stream()
                     .filter(other -> !other.id().equals(room.id()) && sameFloor(other, room))
                     .toList();
             var left = blocked(room, others, Side.WEST) ? room.x() : bounds.minimumX();
             var right = blocked(room, others, Side.EAST) ? room.x() + room.width() : bounds.maximumX();
             var bottom = blocked(room, others, Side.SOUTH) ? room.y() : bounds.minimumY();
             var top = blocked(room, others, Side.NORTH) ? room.y() + room.length() : bounds.maximumY();
-            if (left == room.x() && bottom == room.y()
-                    && right == room.x() + room.width() && top == room.y() + room.length()) {
-                shaped.add(room);
+            // Nothing stands between this room and the boundary on two sides at once, so both edges
+            // reach past the corner and two rooms sharing that corner would each claim all of it.
+            // The claim is withdrawn from whichever edge costs it least until it stands clear.
+            var claim = withdrawFrom(room, others, new double[] {left, bottom, right, top});
+            if (claim[0] == room.x() && claim[1] == room.y()
+                    && claim[2] == room.x() + room.width() && claim[3] == room.y() + room.length()) {
                 continue;
             }
-            var clipped = PlotGeometry.clipToRect(plot, left, bottom, right, top);
+            var clipped = PlotGeometry.clipToRect(plot, claim[0], claim[1], claim[2], claim[3]);
             // Counter-clockwise, always. Anything walking the ring for wall surfaces — the massing
             // view most of all — takes the outward face from the direction each edge runs, so a ring
             // that came back wound the other way would turn every wall of the room inside out.
@@ -1130,15 +1161,90 @@ class GeometryEngine {
             // Only worth reshaping when it actually recovers ground, and never when the clip came
             // back as something that no longer contains the room it started as.
             if (ring.isEmpty() || area <= room.area() + .5 || !containsRoom(ring, room)) {
-                shaped.add(room);
                 continue;
             }
             var box = PlotGeometry.bounds(ring);
-            shaped.add(new RoomGeometry(room.id(), room.type(), round2(box.minimumX()),
+            settled.put(room.id(), new RoomGeometry(room.id(), room.type(), round2(box.minimumX()),
                     round2(box.minimumY()), round2(box.width()), round2(box.length()),
                     round2(area), room.floor(), ring));
         }
-        return List.copyOf(shaped);
+        // Rebuilt in the order the planner produced, because the door pass reads rooms in plan order.
+        return rooms.stream().map(room -> settled.get(room.id())).toList();
+    }
+
+    /**
+     * The order rooms are offered the margin in: enclosed rooms before outdoor programme, and the
+     * larger room first within each.
+     *
+     * <p>Whoever is offered a piece of ground first takes it, so the order is what decides who gets
+     * the corner of a tapered plot. A bedroom standing against the slant should have it before the
+     * balcony beside it does; a balcony stretched to four times the size it was planned at is no
+     * longer a balcony, and the family loses the room the ground could have been.</p>
+     */
+    private List<RoomGeometry> claimOrder(List<RoomGeometry> rooms) {
+        return rooms.stream().sorted(java.util.Comparator
+                        .comparing((RoomGeometry room) -> RoomSpec.isOutdoor(room.type()))
+                        .thenComparing(java.util.Comparator.comparingDouble(RoomGeometry::area).reversed())
+                        .thenComparing(RoomGeometry::id))
+                .toList();
+    }
+
+    /**
+     * Pulls a claim back off every room already standing on the ground it reaches over.
+     *
+     * <p>Only ever gives up ground the room did not start with: the room's own rectangle is kept
+     * whole, so withdrawing can shrink what a room gains but never what it already had.</p>
+     */
+    private double[] withdrawFrom(RoomGeometry room, List<RoomGeometry> others, double[] claim) {
+        // Each pass surrenders at most one edge per neighbour, and there are only four edges to
+        // surrender, so the claim cannot keep shrinking indefinitely.
+        for (var pass = 0; pass < 4; pass++) {
+            var clear = true;
+            for (var other : others) {
+                if (!reachesOver(claim, other)) continue;
+                clear = false;
+                claim = withdrawEdge(room, other, claim);
+            }
+            if (clear) return claim;
+        }
+        return new double[] {room.x(), room.y(), room.x() + room.width(), room.y() + room.length()};
+    }
+
+    /** The claim with the one edge given up that clears this neighbour and costs the least ground. */
+    private double[] withdrawEdge(RoomGeometry room, RoomGeometry other, double[] claim) {
+        var candidates = List.of(
+                new double[] {Math.max(claim[0], other.x() + other.width()), claim[1], claim[2], claim[3]},
+                new double[] {claim[0], Math.max(claim[1], other.y() + other.length()), claim[2], claim[3]},
+                new double[] {claim[0], claim[1], Math.min(claim[2], other.x()), claim[3]},
+                new double[] {claim[0], claim[1], claim[2], Math.min(claim[3], other.y())});
+        double[] best = null;
+        var bestArea = -1d;
+        for (var candidate : candidates) {
+            if (!holdsRoom(candidate, room) || reachesOver(candidate, other)) continue;
+            var area = (candidate[2] - candidate[0]) * (candidate[3] - candidate[1]);
+            if (area > bestArea) {
+                bestArea = area;
+                best = candidate;
+            }
+        }
+        // No edge clears this neighbour while keeping the room whole, which means the two started
+        // out overlapping. Nothing this pass does can fix that, so the room simply stays as it was.
+        return best == null
+                ? new double[] {room.x(), room.y(), room.x() + room.width(), room.y() + room.length()}
+                : best;
+    }
+
+    /** True when the claim would be drawn over ground this room is standing on. */
+    private boolean reachesOver(double[] claim, RoomGeometry other) {
+        return claim[0] < other.x() + other.width() && claim[2] > other.x()
+                && claim[1] < other.y() + other.length() && claim[3] > other.y();
+    }
+
+    /** True when the claim still covers the whole rectangle the room was planned as. */
+    private boolean holdsRoom(double[] claim, RoomGeometry room) {
+        return claim[0] <= room.x() + GAP && claim[1] <= room.y() + GAP
+                && claim[2] >= room.x() + room.width() - GAP
+                && claim[3] >= room.y() + room.length() - GAP;
     }
 
     private enum Side { NORTH, SOUTH, EAST, WEST }

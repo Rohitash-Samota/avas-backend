@@ -81,23 +81,31 @@ public record BuildableEnvelope(
                             + "an expert review rather than automatic generation");
         }
 
-        // Full plot usage is the customer asking for the whole plot, so the packer comes back for
-        // the ground the inscribed rectangle could not reach and plans it as extension zones. Every
-        // other choice keeps the single rectangle it always had.
+        // One rectangle is what the packer can plan, not what the customer is entitled to build. On
+        // an irregular plot the largest one inside the envelope reaches barely two thirds of it, so
+        // the packer comes back for the ground standing empty beside it and plans that too.
+        //
+        // How hard it scrapes is what the plot-usage choice decides. Full plot usage takes even the
+        // strips too narrow to be a room and gives them to the rooms alongside as depth; every other
+        // choice recovers only ground big enough to stand a room in and leaves the rest as margin.
+        // What none of them do any more is discard buildable area: the setback ring is what the rule
+        // holds back, and the area inside it is the customer's whether or not one rectangle covers it.
         var square = rectilinear(outline);
-        var zones = setbacks.waived()
-                ? PlotGeometry.residualRectangles(outline, List.of(footprint),
-                        square ? MINIMUM_STRIP_SIDE : MINIMUM_EXTENSION_SIDE,
-                        square ? MINIMUM_STRIP_AREA : MINIMUM_EXTENSION_AREA)
-                : List.<PlotGeometry.Rect>of();
+        var scrapeStrips = setbacks.waived() && square;
+        var zones = PlotGeometry.residualRectangles(outline, List.of(footprint),
+                scrapeStrips ? MINIMUM_STRIP_SIDE : MINIMUM_EXTENSION_SIDE,
+                scrapeStrips ? MINIMUM_STRIP_AREA : MINIMUM_EXTENSION_AREA);
         var zoneArea = zones.stream().mapToDouble(PlotGeometry.Rect::area).sum();
 
         if (plot.irregular()) {
             var unused = buildableArea - footprint.area() - zoneArea;
             if (!setbacks.waived()) {
-                notes.add("The plot outline is not rectangular; rooms are packed inside the largest rectangle "
-                        + "that fits within the setback envelope, leaving "
-                        + round(buildableArea - footprint.area()) + " sq ft of buildable area unused");
+                notes.add("The plot outline is not rectangular; rooms are packed into the largest rectangle "
+                        + "that fits within the setback envelope"
+                        + (zones.isEmpty() ? "" : " plus " + zones.size() + " extension zone"
+                                + (zones.size() == 1 ? "" : "s") + " totalling " + round(zoneArea) + " sq ft")
+                        + ", leaving " + round(Math.max(0, unused))
+                        + " sq ft of the buildable area as margin against the setback line");
             } else if (!square) {
                 notes.add("The plot outline is not rectangular and has a slanted boundary; the rooms standing "
                         + "against it are drawn to the boundary's own line so the layout follows the plot "
@@ -169,17 +177,31 @@ public record BuildableEnvelope(
         if (setbacks.waived()) {
             return plotArea;
         }
+        // The same reasoning one line in. A slanted setback line is followed rather than stopped
+        // square of, so the envelope's own area is what a storey can be planned on; anywhere else
+        // it is the packed rectangle plus the ground the extension zones recovered beside it.
+        if (slanted()) {
+            return buildableArea;
+        }
         return footprintArea() + extensionZones.stream().mapToDouble(PlotGeometry.Rect::area).sum();
     }
 
-    /** Open space left outside the packed footprint, in square feet. */
+    /**
+     * Plot area outside the packed footprint, in square feet.
+     *
+     * <p>Not the open ground the plan leaves: the extension zones are counted here and are built on.
+     * This is the complement of {@link #footprintArea()} against the plot, and nothing more.</p>
+     */
     public double openSpaceArea() {
         return Math.max(0, plotArea - footprintArea());
     }
 
-    /** True when the packed rectangle leaves a meaningful part of the envelope unused. */
+    /** True when the layout still leaves a meaningful part of the envelope unused. */
     public boolean underUsesEnvelope() {
-        return buildableArea > 0 && footprintArea() < buildableArea * 0.82d;
+        // Measured against everything a storey can be planned on, not the packed rectangle alone.
+        // Reading the rectangle here told a customer an architect could recover area the extension
+        // zones and the boundary-following rooms had already recovered for them.
+        return buildableArea > 0 && plannableArea() < buildableArea * 0.82d;
     }
 
     /** True when some boundary runs at an angle, so no rectangle can be flush against it. */

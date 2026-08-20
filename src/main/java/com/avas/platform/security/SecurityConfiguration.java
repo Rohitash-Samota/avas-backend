@@ -47,6 +47,10 @@ public class SecurityConfiguration {
                         .requestMatchers("/actuator/**", "/error", "/api/v1/auth/register", "/api/v1/auth/login",
                                 "/api/v1/auth/login/mobile", "/api/v1/auth/refresh", "/api/v1/auth/providers").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/commerce/products").permitAll()
+                        // The approved construction catalogue is public read, like the commerce
+                        // catalogue. Everything unreviewed stays behind /api/v1/admin/catalog.
+                        .requestMatchers(HttpMethod.GET, "/api/v1/catalog/products",
+                                "/api/v1/catalog/products/**", "/api/v1/catalog/categories").permitAll()
                         .requestMatchers("/api/v1/auth/**").authenticated()
                         .requestMatchers("/api/v1/admin/roles/**", "/api/v1/admin/users/*/roles/**").hasAuthority("ROLE_MANAGE")
                         .requestMatchers("/api/v1/admin/users/**").hasAuthority("USER_MANAGE")
@@ -55,6 +59,7 @@ public class SecurityConfiguration {
                         .requestMatchers("/api/v1/admin/configuration/**").hasAuthority("PLATFORM_CONFIG_MANAGE")
                         .requestMatchers("/api/v1/admin/models/**").hasAuthority("MODEL_MANAGE")
                         .requestMatchers("/api/v1/admin/pricing/**").hasAuthority("PRICE_MANAGE")
+                        .requestMatchers("/api/v1/admin/catalog/**").hasAuthority("CATALOG_MANAGE")
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/v1/pricing/submissions").hasAnyAuthority("PRICE_SUBMIT", "PRICE_MANAGE")
                         .requestMatchers(HttpMethod.GET, "/api/v1/pricing/submissions", "/api/v1/pricing/submissions/mine")

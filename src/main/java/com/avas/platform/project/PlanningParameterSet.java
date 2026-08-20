@@ -151,9 +151,11 @@ public record PlanningParameterSet(
     }
 
     private static int bedroomRequirement(BasicDetailsRequest details) {
-        var adults = (details.family().adults() + 1) / 2;
-        var seniors = (details.family().seniorCitizens() + 1) / 2;
-        return Math.max(2, Math.min(6, adults + details.family().children() + seniors));
+        // Deliberately the household's own rule rather than a second copy of it. This counted every
+        // child as a bedroom of their own while the recommendation had them sharing, so the targets
+        // asked the planner for rooms the brief had never promised and every layout came back with a
+        // programme gap against a bedroom count nobody had chosen.
+        return details.family().bedroomsNeeded();
     }
 
     private static List<String> bedroomFloors(List<String> floors, int bedrooms) {

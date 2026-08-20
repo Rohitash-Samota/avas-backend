@@ -104,9 +104,16 @@ class ProjectServiceTest {
         assertThat(drawings).hasSize(3).extracting(DrawingCandidate::strategy)
                 .containsExactly("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
         assertThat(drawings).allSatisfy(drawing -> {
-            assertThat(drawing.hardViolations()).isNotEmpty()
-                    .allMatch(violation -> violation.startsWith("Programme gap:"));
-            assertThat(drawing.explanations()).anyMatch(explanation -> explanation.contains("Professional review required"));
+            // The programme the planner is given is the one the customer was quoted, so a layout
+            // that places it has nothing to report. This used to come back flagged for review
+            // against a bedroom count nobody had chosen: the parameter targets counted every child
+            // as a bedroom of their own while the recommendation had them sharing, so all three
+            // candidates were short of a bedroom that was never in the brief.
+            assertThat(drawing.hardViolations()).isEmpty();
+            assertThat(drawing.status()).isEqualTo("SUCCESS");
+            assertThat(drawing.explanations())
+                    .anyMatch(explanation -> explanation.contains(
+                            recommendation.bedrooms() + " core bedrooms are recommended"));
         });
 
         var automaticallyFrozen = service.estimates(project.id());
@@ -138,21 +145,18 @@ class ProjectServiceTest {
                 .mapToLong(EstimateItem::amount).sum();
         assertThat(fallbackCore).isEqualTo(2_600L * drawings.get(1).builtUpArea());
         var validation = service.validation(drawings.get(1).id());
-        assertThat(validation.status()).isEqualTo(EngineStatus.EXPERT_REVIEW);
+        assertThat(validation.status()).isEqualTo(EngineStatus.SUCCESS);
         var buildingRules = validation.gates().stream()
                 .filter(gate -> gate.name().equals("Building rules")).findFirst().orElseThrow();
-        assertThat(buildingRules.status()).isEqualTo("REVIEW_REQUIRED");
-        assertThat(buildingRules.detail()).contains("unresolved hard/programme constraint")
-                .contains("Programme gap:")
-                .doesNotContain("No unresolved hard constraints");
+        assertThat(buildingRules.status()).isEqualTo("PASSED");
+        assertThat(buildingRules.detail()).contains("No unresolved hard constraints");
         var estimateEvidence = validation.gates().stream()
                 .filter(gate -> gate.name().equals("Estimate evidence")).findFirst().orElseThrow();
         assertThat(estimateEvidence.status()).isEqualTo("PASSED");
         assertThat(estimateEvidence.detail()).contains("accepted freshness window");
-        assertThat(validation.professionalReview()).containsAll(drawings.get(1).hardViolations());
-        assertThat(drawings.get(1).hardViolations())
-                .noneMatch(value -> value.startsWith("Programme gap: placed built-up area"));
-        assertThat(service.get(project.id()).status()).isEqualTo("REVIEW_REQUIRED");
+        // Sign-off is never waived by a clean run; it is scope, not a finding.
+        assertThat(validation.professionalReview()).contains("Licensed architect review");
+        assertThat(service.get(project.id()).status()).isEqualTo("CONCEPTS_READY");
     }
 
     @Test

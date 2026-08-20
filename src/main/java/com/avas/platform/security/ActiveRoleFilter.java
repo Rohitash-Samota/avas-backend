@@ -6,6 +6,8 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -19,6 +21,7 @@ import java.util.stream.Stream;
 
 @Component
 public class ActiveRoleFilter extends OncePerRequestFilter {
+    private static final Logger log = LoggerFactory.getLogger(ActiveRoleFilter.class);
     public static final String ACTIVE_ROLE = "avas.activeRole";
     public static final String ACTIVE_PERMISSIONS = "avas.activePermissions";
     private final AuthService auth;
@@ -41,7 +44,7 @@ public class ActiveRoleFilter extends OncePerRequestFilter {
                     : auth.assignedActiveRole(principal.userId(), requestedRole);
             if (role.isEmpty() && authBootstrap) role = auth.firstAssignedActiveRole(principal.userId());
             if (role.isEmpty()) {
-                reject(response);
+                reject(response, principal.userId(), requestedRole, correlationId);
                 return;
             }
             var active = role.get();
@@ -62,7 +65,11 @@ public class ActiveRoleFilter extends OncePerRequestFilter {
         chain.doFilter(request, response);
     }
 
-    private void reject(HttpServletResponse response) throws IOException {
+    private void reject(HttpServletResponse response, UUID userId, String requestedRole, String correlationId) throws IOException {
+        log.warn("Active role rejected: correlationId={} userId={} requestedRole={} assignedRoles={}",
+                correlationId, userId,
+                requestedRole == null || requestedRole.isBlank() ? "<none>" : requestedRole,
+                auth.assignedRoleCodes(userId));
         response.setStatus(HttpStatus.FORBIDDEN.value());
         response.setContentType("application/json");
         response.getWriter().write("{\"status\":403,\"code\":\"ACTIVE_ROLE_NOT_ASSIGNED\",\"message\":\"The selected role is not active or assigned to this account. Choose one of the account's available roles.\"}");

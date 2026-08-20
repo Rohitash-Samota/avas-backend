@@ -441,18 +441,9 @@ public class ProjectService {
     private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
         var d = project.details;
         var members = d.family().members();
-        // Two to a room across the whole household: couples share, children share, and seniors share.
-        // Giving every child a room of their own was inflating a four-child family to six bedrooms
-        // and pushing the built-up target past what the plot and the budget could carry, which is
-        // how a brief ends up with more bathrooms than the drawing can place. Sharing is also what
-        // these households actually do; a family who wants a room per child raises the child count's
-        // effect by asking for more bedrooms in their priorities.
-        // A regular guest room remains a preferred flex space rather than inflating the permanent
-        // household count. The six-room ceiling is the current low-rise geometry-engine limit.
-        var adultBedrooms = (d.family().adults() + 1) / 2;
-        var childBedrooms = (d.family().children() + 1) / 2;
-        var seniorBedrooms = (d.family().seniorCitizens() + 1) / 2;
-        var bedrooms = Math.max(2, Math.min(6, adultBedrooms + childBedrooms + seniorBedrooms));
+        // The household's own rule, so the brief a customer reads, the parameter targets and the
+        // planned programme cannot drift apart the way three separate copies of it did.
+        var bedrooms = d.family().bedroomsNeeded();
         var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
         // Target the same footprint the geometry engine will pack into, so a candidate is never
         // measured against an area the envelope could not have produced.

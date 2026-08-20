@@ -130,6 +130,12 @@ public class AuthService {
                 .findFirst().map(RoleResponse::from);
     }
 
+    public List<String> assignedRoleCodes(UUID userId) {
+        return users.findById(userId).stream()
+                .flatMap(user -> user.getRoles().stream())
+                .map(RoleEntity::getCode).sorted().toList();
+    }
+
     public UserResponse assignRole(UUID userId, String roleCode) {
         var user = requiredUser(userId);
         var role = requiredRole(roleCode.toUpperCase());
