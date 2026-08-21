@@ -206,12 +206,17 @@ public class ProjectService {
         final BasicDetailsRequest frozenDetails;
         final Recommendation frozenRecommendation;
         final String tenantId;
+        // Resolved here rather than inside the parameter client so the room programme is sized
+        // against the same envelope the layout is later packed into, and an unbuildable plot still
+        // fails with its own actionable message before any network call is made.
+        final BuildableEnvelope frozenEnvelope;
         synchronized (this) {
             var project = required(projectId);
             if (project.requirementSummary == null) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Approve the requirement summary before generating drawings");
             }
+            frozenEnvelope = requireBuildableEnvelope(project);
             snapshotId = project.requirementSummary.snapshotId();
             frozenDetails = project.details;
             frozenRecommendation = project.recommendation;
@@ -220,7 +225,8 @@ public class ProjectService {
         }
         // Network I/O must not hold the singleton ProjectService monitor: one slow provider must
         // never block unrelated project mutations. The frozen snapshot is rechecked before commit.
-        var parameters = planningParameters.optimize(tenantId, projectId, snapshotId, frozenDetails);
+        var parameters = planningParameters.optimize(tenantId, projectId, snapshotId, frozenDetails,
+                frozenEnvelope);
         synchronized (this) {
         var project = required(projectId);
         if (project.requirementSummary == null
@@ -441,9 +447,11 @@ public class ProjectService {
     private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
         var d = project.details;
         var members = d.family().members();
+        var wanted = LifestylePreferences.of(d.preferences());
         // The household's own rule, so the brief a customer reads, the parameter targets and the
-        // planned programme cannot drift apart the way three separate copies of it did.
-        var bedrooms = d.family().bedroomsNeeded();
+        // planned programme cannot drift apart the way three separate copies of it did — plus
+        // whatever the customer asked for on top of it, which until now was stored and ignored.
+        var bedrooms = wanted.bedroomsFor(d.family());
         var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
         // Target the same footprint the geometry engine will pack into, so a candidate is never
         // measured against an area the envelope could not have produced.
@@ -455,7 +463,27 @@ public class ProjectService {
         var guestReason = d.family().regularGuests()
                 ? "A preferred flex/guest room is included without changing the permanent bedroom count"
                 : "No separate regular-guest room was requested";
-        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, d.parameters().parkingCars(), round10(builtUp * .92), round10(builtUp * 1.08), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, d.preferences().stream().anyMatch(v -> v.toLowerCase().contains("future")), 92, List.of(members + " permanent family members share " + bedrooms + " core bedrooms at two per room", d.plotWidth() + " × " + d.plotLength() + " ft " + d.roadFacing().name().toLowerCase() + "-facing plot", guestReason, category + " specification calibrated to the approved budget", "Hard rules are checked before lifestyle ranking"), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, wanted.parkingFor(d.parameters()), round10(builtUp * .92), round10(builtUp * 1.08), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, wanted.futureExpansion(), 92, reasonsFor(d, members, bedrooms, category, guestReason, wanted), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
+    }
+
+    /**
+     * What the brief says, with the customer's own priorities said back to them.
+     *
+     * <p>A preference that changes the plan and is never mentioned is indistinguishable from one
+     * that was ignored, which is what every chip but future expansion previously was.</p>
+     */
+    private List<String> reasonsFor(BasicDetailsRequest d, int members, int bedrooms, String category,
+            String guestReason, LifestylePreferences wanted) {
+        var reasons = new ArrayList<String>();
+        reasons.add(members + " permanent family members share " + bedrooms
+                + " core bedrooms at two per room");
+        reasons.add(d.plotWidth() + " × " + d.plotLength() + " ft "
+                + d.roadFacing().name().toLowerCase() + "-facing plot");
+        reasons.add(guestReason);
+        reasons.add(category + " specification calibrated to the approved budget");
+        reasons.addAll(wanted.reasons());
+        reasons.add("Hard rules are checked before lifestyle ranking");
+        return List.copyOf(reasons);
     }
 
     private RequirementSummary requirementFor(ProjectAggregate project) {
@@ -532,7 +560,7 @@ public class ProjectService {
     private long roundLakh(double value) { return Math.round(value / 100_000.0) * 100_000; }
 
     private static PlanningParameterClient deterministicPlanningParameters() {
-        return (tenantId, projectId, contextVersion, details) ->
-                PlanningParameterSet.deterministic(details, null);
+        return (tenantId, projectId, contextVersion, details, envelope) ->
+                PlanningParameterSet.deterministic(details, envelope, null);
     }
 }

@@ -52,6 +52,16 @@ final class FloorPlanner {
     private final int floorCount;
     private final Recommendation recommendation;
     private final HomeParameters parameters;
+    /**
+     * The optimized room programme for this option, or {@code null} to plan from type defaults.
+     *
+     * <p>Until this was passed in, the parameter variants — the entire output of the planning
+     * optimizer, AI or deterministic — reached the engine and were read in exactly one place, a
+     * post-hoc audit that compared the drawing against them and printed the differences. They sized
+     * nothing and placed nothing, so plot area, budget and household reached the optimizer, changed
+     * its answer, and then changed no wall in the drawing.</p>
+     */
+    private final PlanningParameterVariant variant;
     private final double frontShare;
     private final boolean liftRequired;
     private final boolean stairRequired;
@@ -89,10 +99,17 @@ final class FloorPlanner {
 
     FloorPlanner(BuildableEnvelope envelope, Facing facing, int floorCount, double stripSplit,
             double frontShare, Recommendation recommendation, HomeParameters parameters) {
+        this(envelope, facing, floorCount, stripSplit, frontShare, recommendation, parameters, null);
+    }
+
+    FloorPlanner(BuildableEnvelope envelope, Facing facing, int floorCount, double stripSplit,
+            double frontShare, Recommendation recommendation, HomeParameters parameters,
+            PlanningParameterVariant variant) {
         this.facing = facing;
         this.floorCount = floorCount;
         this.recommendation = recommendation;
         this.parameters = parameters;
+        this.variant = variant;
         this.frontShare = frontShare;
         this.stairRequired = floorCount > 1;
         this.liftRequired = floorCount > 1 && !"NONE".equals(parameters.liftProvision());
@@ -273,8 +290,13 @@ final class FloorPlanner {
      * stacks whatever the front of each storey does.</p>
      */
     private double frontDepth(int floorIndex, double outdoorArea) {
-        var living = RoomSpec.of(floorIndex == 0 ? "LIVING_ROOM" : "FAMILY_LOUNGE");
-        var wanted = (living.preferredArea() + (floorIndex == 0 ? outdoorArea : 0)) / bandTotal;
+        var leadType = floorIndex == 0 ? "LIVING_ROOM" : "FAMILY_LOUNGE";
+        var living = RoomSpec.of(leadType);
+        // The band's depth follows the space that leads it, so the programme has to be read here
+        // too: sizing the public band from the type catalogue while the rooms inside it were sized
+        // from the programme meant the largest room in the house came out the same width whatever
+        // the plot and the budget could afford.
+        var wanted = (wantedArea(floorIndex, leadType) + (floorIndex == 0 ? outdoorArea : 0)) / bandTotal;
         var minimum = living.minShortSide();
         if (floorIndex == 0 && parameters.parkingCars() > 0 && outdoorArea > 0) {
             minimum = Math.max(minimum, PARKING_DEPTH);
@@ -308,17 +330,17 @@ final class FloorPlanner {
         if (ground) {
             var outdoor = groundOutdoorArea();
             if (outdoor > 1) front.add(new Request(groundOutdoorType(), outdoor));
-            front.add(Request.of("LIVING_ROOM"));
+            front.add(want(floorIndex, "LIVING_ROOM"));
             // Dining leads the sleeping strip so it opens straight off the living room, the way a
             // living-dining runs in a real plan, and the kitchen faces it across the passage.
-            sleeping.add(Request.of("DINING"));
+            sleeping.add(want(floorIndex, "DINING"));
             // A bungalow has no upper floor to put the family room on, so it belongs here.
             if (floorCount == 1 && recommendation.familyLounge()) {
-                sleeping.add(Request.of("FAMILY_LOUNGE"));
+                sleeping.add(want(floorIndex, "FAMILY_LOUNGE"));
             }
-            service.add(Request.of("KITCHEN"));
-            service.add(Request.of("UTILITY"));
-            service.add(Request.of("BATHROOM"));
+            service.add(want(floorIndex, "KITCHEN"));
+            service.add(want(floorIndex, "UTILITY"));
+            service.add(want(floorIndex, "BATHROOM"));
         } else {
             // A terrace belongs over the ground-floor porch, on the road frontage, not buried
             // between rooms where it would be an open shaft nobody can reach the edge of.
@@ -326,25 +348,74 @@ final class FloorPlanner {
                 front.add(new Request("TERRACE", topFloorTerraceArea()));
             }
             for (var index = 0; index < balconiesOnFloor(floorIndex); index++) {
-                front.add(Request.of("BALCONY"));
+                front.add(want(floorIndex, "BALCONY"));
             }
-            front.add(Request.of(recommendation.familyLounge() ? "FAMILY_LOUNGE" : "MULTIPURPOSE_ROOM"));
-            service.add(Request.of("BATHROOM"));
-            service.add(Request.of(floorIndex == 1 ? "STUDY" : "HOME_OFFICE"));
-            service.add(Request.of("STORE"));
+            front.add(want(floorIndex,
+                    recommendation.familyLounge() ? "FAMILY_LOUNGE" : "MULTIPURPOSE_ROOM"));
+            service.add(want(floorIndex, "BATHROOM"));
+            service.add(want(floorIndex, floorIndex == 1 ? "STUDY" : "HOME_OFFICE"));
+            service.add(want(floorIndex, "STORE"));
         }
 
         // Bedrooms, each followed by its own bathroom so the pair shares a wall.
         var attachedLeft = attachedCount;
         for (var index = 0; index < bedroomCount; index++) {
-            sleeping.add(Request.of(bedroomType(floorIndex, index)));
+            sleeping.add(want(floorIndex, bedroomType(floorIndex, index)));
             if (attachedLeft > 0) {
-                sleeping.add(Request.of("ATTACHED_BATHROOM"));
+                sleeping.add(want(floorIndex, "ATTACHED_BATHROOM"));
                 attachedLeft--;
             }
         }
-        if (sleeping.isEmpty()) sleeping.add(Request.of("FLEX_ROOM"));
+        if (sleeping.isEmpty()) sleeping.add(want(floorIndex, "FLEX_ROOM"));
         return new FloorProgramme(front, sleeping, service);
+    }
+
+    /**
+     * A request for one space, sized from the optimized programme where it names that space.
+     *
+     * <p>Looked up against the floor it is being placed on, because the same type is legitimately a
+     * different size upstairs: the ground-floor bathroom of an accessible home is larger than the
+     * one beside a first-floor bedroom, and the programme says so.</p>
+     *
+     * <p>Whatever the programme asks for is clamped into the band {@link RoomSpec} holds for the
+     * type. That is the line between an optimizer and a drawing: a proposal may prefer a 500 sq ft
+     * kitchen or a 40 sq ft bedroom, and neither is a room this engine will draw. Falling back to
+     * the type's own preferred area when the programme is silent keeps a planner built without a
+     * variant — every existing caller — producing exactly the geometry it produced before.</p>
+     */
+    private Request want(int floorIndex, String type) {
+        return new Request(type, wantedArea(floorIndex, type));
+    }
+
+    /**
+     * Area this space should be planned at on this floor: the programme's, or the type's own.
+     *
+     * <p>Always clamped into the {@link RoomSpec} band, so however a proposal is arrived at the
+     * drawing only ever contains sizes the space is usable at.</p>
+     */
+    private double wantedArea(int floorIndex, String type) {
+        var spec = RoomSpec.of(type);
+        var target = targetArea(floorIndex, type);
+        return Double.isNaN(target) ? spec.preferredArea()
+                : clamp(target, spec.minArea(), spec.maxArea());
+    }
+
+    /** Area the programme asks for this type on this floor, or {@code NaN} when it does not name it. */
+    private double targetArea(int floorIndex, String type) {
+        if (variant == null || variant.roomTargets() == null) return Double.NaN;
+        var floor = floorName(floorIndex);
+        Double sameFloor = null;
+        Double anyFloor = null;
+        for (var target : variant.roomTargets()) {
+            if (!type.equalsIgnoreCase(target.roomType())) continue;
+            if (floor.equalsIgnoreCase(target.floor())) {
+                sameFloor = target.targetAreaSqFt();
+                break;
+            }
+            if (anyFloor == null) anyFloor = target.targetAreaSqFt();
+        }
+        var resolved = sameFloor != null ? sameFloor : anyFloor;
+        return resolved == null ? Double.NaN : resolved;
     }
 
     private String groundOutdoorType() {

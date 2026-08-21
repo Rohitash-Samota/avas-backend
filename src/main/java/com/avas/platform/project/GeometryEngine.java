@@ -4,6 +4,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -90,7 +91,7 @@ class GeometryEngine {
             var variant = variantFor(parameterSet, strategy.key());
             var optionParameters = optionParameters(details.parameters(), variant);
             var planner = plannerFor(envelope, details.roadFacing(), details.floors(), strategy,
-                    recommendation, optionParameters);
+                    recommendation, optionParameters, variant);
             // Extension rooms join before the openings are placed, so the door tree reaches them
             // through the walls they genuinely share rather than through an afterthought.
             var rooms = extensionRooms(envelope, planner.planBuilding(), details.floors());
@@ -117,6 +118,11 @@ class GeometryEngine {
             violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
             var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea, optionParameters, variant);
             violations.addAll(programmeGaps);
+            // Measured from the layout that was just placed, rather than read off the strategy.
+            // These used to be constants, so all three options scored the same on every project
+            // ever generated and the ranking said nothing about the homes being compared.
+            var score = CandidateScore.measure(rooms, windows, envelope, details.roadFacing(),
+                    details.floors());
             var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
             var provenance = new LinkedHashMap<>(versions);
             provenance.put("generator", "AVAS deterministic layout engine");
@@ -218,10 +224,10 @@ class GeometryEngine {
                     builtUpArea,
                     recommendation.estimatedCostLow(),
                     recommendation.estimatedCostHigh(),
-                    strategy.vastuScore(),
-                    strategy.naturalLightScore(),
-                    strategy.spaceEfficiencyScore(),
-                    92 - index,
+                    score.vastu(),
+                    score.naturalLight(),
+                    score.spaceEfficiency(),
+                    score.overall(variant == null ? null : variant.weights(), violations.size()),
                     new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms,
                             doors, windows, envelope.plot().vertices(), envelope.buildableOutline(),
                             envelope.setbacks(), envelope.plotArea(), envelope.buildableArea(),
@@ -230,7 +236,7 @@ class GeometryEngine {
                     List.copyOf(violations),
                     softRecommendations(envelope, planner.notes(),
                             daylightNotes(envelope, rooms, windows, details.roadFacing())),
-                    programmeExplanations(strategy, variant, programmeGaps),
+                    programmeExplanations(strategy, variant, programmeGaps, score),
                     Map.copyOf(provenance),
                     reviewRequired ? "EXPERT_REVIEW" : "SUCCESS",
                     false,
@@ -344,6 +350,10 @@ class GeometryEngine {
             return List.of();
         }
         var elements = new ArrayList<SiteElement>();
+        // Whether the approach band ends up carrying cars. A front setback too shallow to stand a
+        // car in is still the deepest open ground on the plot, and on "setbacks with garden" it is
+        // usually the only piece a garden will fit on.
+        var approachParked = false;
         var horizontalApproach = facing == Facing.NORTH || facing == Facing.SOUTH;
         // The approach is the largest piece of open ground on the road side, because that is the
         // only ground a car can reach from the street.
@@ -361,6 +371,7 @@ class GeometryEngine {
             var parkedOutside = approachDepth < CAR_WIDTH ? 0
                     : Math.min(parameters.parkingCars(), (int) Math.floor(approachRun / runPerCar));
             if (parkedOutside > 0) {
+                approachParked = true;
                 var bayRun = parkedOutside * runPerCar;
                 var label = parkedOutside + " car open parking";
                 if (horizontalApproach) {
@@ -382,10 +393,15 @@ class GeometryEngine {
         // Garden is a finish-tier promise, so it is only drawn where the specification carries it —
         // or where the customer asked for the open ground to be planned, which buys it at any tier.
         if (parameters.plansOpenSpace() || category == Category.LUXURY || category == Category.PREMIUM) {
+            // The approach is only withheld from the garden when a car is actually standing on it.
+            // Excluding it either way meant that on an ordinary plot — where the front setback is
+            // the one band deep enough to plant and too shallow to park in — "setbacks with garden"
+            // drew no garden at all, and was indistinguishable from plain standard setbacks.
+            var parkedOn = approachParked ? approach : null;
             open.stream()
-                    .filter(piece -> piece != approach)
+                    .filter(piece -> piece != parkedOn)
                     .filter(piece -> Math.min(piece.width(), piece.length()) >= USABLE_OPEN_DEPTH)
-                    .max(java.util.Comparator.comparingDouble(PlotGeometry.Rect::area))
+                    .max(Comparator.comparingDouble(PlotGeometry.Rect::area))
                     .ifPresent(piece -> elements.add(SiteElement.of("site-garden", "GARDEN", "Garden",
                             piece.x(), piece.y(), piece.width(), piece.length())));
         }
@@ -544,7 +560,22 @@ class GeometryEngine {
 
     private List<String> programmeExplanations(Strategy strategy, PlanningParameterVariant variant,
             List<String> gaps) {
-        var explanations = new ArrayList<>(strategy.explanations());
+        return programmeExplanations(strategy, variant, gaps, null);
+    }
+
+    /**
+     * Why this option came out the way it did, led by what was measured on the drawing itself.
+     *
+     * <p>The strategy's own sentences describe an intention and are true of every project it is
+     * applied to. The measured reasons describe this plan: how much of the plot it used, which
+     * rooms ended up connected, how many have a window. A customer choosing between three options
+     * needs the second kind to tell them apart.</p>
+     */
+    private List<String> programmeExplanations(Strategy strategy, PlanningParameterVariant variant,
+            List<String> gaps, CandidateScore score) {
+        var explanations = new ArrayList<String>();
+        if (score != null) explanations.addAll(score.reasons());
+        explanations.addAll(strategy.explanations());
         if (variant != null && variant.explanations() != null) explanations.addAll(variant.explanations());
         gaps.forEach(gap -> explanations.add("Professional review required - " + gap));
         return List.copyOf(explanations);
@@ -984,9 +1015,10 @@ class GeometryEngine {
      * dimensions it is usable at would be choosing a look over a home.</p>
      */
     private FloorPlanner plannerFor(BuildableEnvelope envelope, Facing roadFacing, int floorCount,
-            Strategy strategy, Recommendation recommendation, HomeParameters parameters) {
+            Strategy strategy, Recommendation recommendation, HomeParameters parameters,
+            PlanningParameterVariant variant) {
         return new FloorPlanner(envelope, roadFacing, floorCount, strategy.columnSplit(),
-                strategy.rowSplit(), recommendation, parameters);
+                strategy.rowSplit(), recommendation, parameters, variant);
     }
 
     /** Floor area an extension room aims for, matched to the ordinary rooms beside it. */
@@ -1044,7 +1076,7 @@ class GeometryEngine {
                     continue;
                 }
                 for (var piece : pieces) {
-                    var type = types.get(Math.min(taken, types.size() - 1));
+                    var type = extensionTypeFor(piece, types, taken);
                     taken++;
                     rooms.add(room(floorIndex, index++, type,
                             piece.x(), piece.y(), piece.width(), piece.length()));
@@ -1278,6 +1310,43 @@ class GeometryEngine {
     }
 
     /** Splits one zone into rooms, or into nothing when it is too narrow to hold one. */
+    /**
+     * The room an extension piece is actually the size of.
+     *
+     * <p>Taking the next type off the list regardless of the piece it lands on is what produced a
+     * 239 sq ft study and a 144 sq ft store — both rooms the catalogue caps at 170 and 90, drawn at
+     * half as much again because the ground happened to be there. A room is named for what it can
+     * be furnished as, so the piece chooses the type rather than the other way round.</p>
+     *
+     * <p>Preference still runs down the list, so a plot with several zones gets a lounge before a
+     * store rather than four of the same room; {@code taken} only rotates the starting point among
+     * the types that fit. When the piece is larger than every candidate the roomiest one is used —
+     * {@link #subdivideZone} has already split it as far as it usefully splits — and when it is
+     * smaller than all of them the tightest one is, which is the store the leftover really is.</p>
+     */
+    String extensionTypeFor(PlotGeometry.Rect piece, List<String> types, int taken) {
+        var across = Math.min(piece.width(), piece.length());
+        var along = Math.max(piece.width(), piece.length());
+        var area = piece.area();
+        var fitting = new ArrayList<String>();
+        for (var type : types) {
+            var spec = RoomSpec.of(type);
+            if (across + .01 >= spec.minShortSide() && along + .01 >= spec.minLongSide()
+                    && area + .5 >= spec.minArea() && area <= spec.maxArea() + .5) {
+                fitting.add(type);
+            }
+        }
+        if (!fitting.isEmpty()) {
+            return fitting.get(taken % fitting.size());
+        }
+        // Nothing fits the piece exactly. Too large for every band means the roomiest type is the
+        // honest name for it; too small means the tightest one is.
+        var roomiest = types.stream().max(Comparator.comparingDouble(type -> RoomSpec.of(type).maxArea()));
+        var tightest = types.stream().min(Comparator.comparingDouble(type -> RoomSpec.of(type).minArea()));
+        var oversized = roomiest.map(type -> area > RoomSpec.of(type).maxArea()).orElse(false);
+        return (oversized ? roomiest : tightest).orElse("MULTIPURPOSE_ROOM");
+    }
+
     private List<PlotGeometry.Rect> subdivideZone(PlotGeometry.Rect zone) {
         if (Math.min(zone.width(), zone.length()) < EXTENSION_MINIMUM_SIDE) {
             return List.of();

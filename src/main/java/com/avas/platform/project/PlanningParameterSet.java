@@ -36,6 +36,11 @@ public record PlanningParameterSet(
     }
 
     public static PlanningParameterSet deterministic(BasicDetailsRequest details, String warning) {
+        return deterministic(details, null, warning);
+    }
+
+    public static PlanningParameterSet deterministic(BasicDetailsRequest details,
+            BuildableEnvelope envelope, String warning) {
         var value = details.parameters();
         var strategies = List.of("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED");
         var titles = List.of("Efficient Courtyard", "Garden Threshold", "Lightwell House");
@@ -57,7 +62,7 @@ public record PlanningParameterSet(
                     value.terraceRequired(), value.courtyardRequired(),
                     value.accessibleGroundFloor(),
                     value.parkingCars(), value.solarReady(), value.rainwaterHarvesting(),
-                    deterministicRoomTargets(details, index),
+                    deterministicRoomTargets(details, envelope, index),
                     weights,
                     List.of(programmeExplanation(details),
                             circulationExplanation(details),
@@ -68,8 +73,18 @@ public record PlanningParameterSet(
                 warning == null ? List.of() : List.of(warning), List.copyOf(variants));
     }
 
+    /**
+     * Room targets for one strategy, sized to the ground and the budget this project actually has.
+     *
+     * <p>The base areas below are a well-proportioned concept programme, not an answer: they were
+     * previously emitted unchanged for every project, so a 900 sq ft plot on a fifteen-lakh budget
+     * asked for exactly the rooms a 4,000 sq ft plot on two crore did. The programme is therefore
+     * costed against what a storey can be planned on and what the finish tier pays for, and scaled
+     * to fit — with priority deciding who gives way, so a plot that cannot carry the whole brief
+     * loses the optional lounge before the bedrooms stop holding a bed.</p>
+     */
     private static List<PlanningParameterVariant.RoomTarget> deterministicRoomTargets(
-            BasicDetailsRequest details, int strategyIndex) {
+            BasicDetailsRequest details, BuildableEnvelope envelope, int strategyIndex) {
         var targets = new java.util.ArrayList<PlanningParameterVariant.RoomTarget>();
         targets.add(target("LIVING_ROOM", "GROUND", 1,
                 area(strategyIndex, 160, 200, 240), "REQUIRED"));
@@ -147,7 +162,84 @@ public record PlanningParameterSet(
             targets.add(target("TERRACE", floors.getLast(), 1,
                     area(strategyIndex, 100, 120, 160), "OPTIONAL"));
         }
-        return List.copyOf(targets);
+        return fitToProject(targets, details, envelope);
+    }
+
+    /**
+     * Rescales a base programme to the ground and the budget the project actually has.
+     *
+     * <p>Two ceilings bind. The first is physical: how much indoor floor a storey can be planned
+     * on, across the floors requested, once the share that stays unenclosed is set aside. The
+     * second is financial: what the approved budget buys at this finish tier. Whichever is smaller
+     * is what the family gets, because a programme drawn past either one is a promise the drawing
+     * or the estimate cannot keep.</p>
+     *
+     * <p>The shortfall is not shared equally. A bedroom that loses a fifth of its area stops
+     * holding a bed and a wardrobe, whereas an optional lounge that loses a fifth is simply a
+     * smaller lounge — so priority decides who gives way, and every result is clamped into the band
+     * {@link RoomSpec} says the space is usable at. A target can therefore never be scaled into
+     * something nobody could occupy, however small the plot.</p>
+     */
+    private static List<PlanningParameterVariant.RoomTarget> fitToProject(
+            List<PlanningParameterVariant.RoomTarget> base, BasicDetailsRequest details,
+            BuildableEnvelope envelope) {
+        var wanted = base.stream()
+                .filter(target -> !RoomSpec.isOutdoor(target.roomType()))
+                .mapToDouble(target -> target.targetAreaSqFt() * target.count()).sum();
+        if (wanted <= 0) return List.copyOf(base);
+
+        var plannable = envelope != null ? envelope.plannableArea() : details.plotArea();
+        var indoor = plannable * details.floors() * (1 - FloorPlanner.OUTDOOR_SHARE);
+        var affordable = details.budget() / (double) buildRate(details.category());
+        var scale = clamp(Math.min(indoor, affordable) / wanted, MINIMUM_SCALE, MAXIMUM_SCALE);
+
+        var fitted = new java.util.ArrayList<PlanningParameterVariant.RoomTarget>(base.size());
+        for (var target : base) {
+            var spec = RoomSpec.of(target.roomType());
+            var area = clamp(target.targetAreaSqFt() * priorityScale(scale, target.priority()),
+                    spec.minArea(), spec.maxArea());
+            fitted.add(new PlanningParameterVariant.RoomTarget(target.roomType(), target.floor(),
+                    target.count(), round1(area), target.priority()));
+        }
+        return List.copyOf(fitted);
+    }
+
+    /** Below this the programme is not shrunk further; rooms are dropped by the planner instead. */
+    private static final double MINIMUM_SCALE = .62d;
+    /** Above this a family is being given rooms larger than they asked for rather than more rooms. */
+    private static final double MAXIMUM_SCALE = 1.85d;
+
+    /** Construction rate per square foot by finish tier; the same basis the recommendation costs at. */
+    private static int buildRate(Category category) {
+        return switch (category) {
+            case LUXURY -> 3300;
+            case PREMIUM -> 2600;
+            default -> 1950;
+        };
+    }
+
+    /**
+     * How much of the project's surplus or shortfall this priority absorbs.
+     *
+     * <p>Damped for the rooms a home cannot do without and amplified for the ones it can, so the
+     * core programme stays close to its proper size in both directions: a large plot should buy a
+     * family more generous shared space and a study, not a bedroom they have to cross to furnish.</p>
+     */
+    private static double priorityScale(double scale, String priority) {
+        var share = switch (priority) {
+            case "REQUIRED" -> scale >= 1 ? .55d : .5d;
+            case "PREFERRED" -> 1d;
+            default -> scale >= 1 ? 1.35d : 1.45d;
+        };
+        return 1 + (scale - 1) * share;
+    }
+
+    private static double clamp(double value, double low, double high) {
+        return Math.max(low, Math.min(high, value));
+    }
+
+    private static double round1(double value) {
+        return Math.round(value * 10d) / 10d;
     }
 
     private static int bedroomRequirement(BasicDetailsRequest details) {

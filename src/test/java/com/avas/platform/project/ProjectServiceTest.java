@@ -232,6 +232,39 @@ class ProjectServiceTest {
      * budget across a much larger house and lands on a different tier, which
      * {@link #fullPlotUsageBuildsTheWholePlotAndSpreadsTheBudgetThinner()} covers directly.</p>
      */
+    @Test
+    void statedPrioritiesChangeThePlanRatherThanBeingStoredAndIgnored() {
+        // The wizard offers seven priority chips and every one of them reached the platform. Exactly
+        // one was ever read — a bare contains("future") — so a customer who asked for an extra
+        // bedroom and a second parking bay received the identical home to one who asked for nothing.
+        var plain = recommendationWith(List.of("Natural light"));
+        var asked = recommendationWith(List.of("More bedrooms", "More parking", "Rental floor"));
+
+        assertThat(asked.bedrooms()).isEqualTo(plain.bedrooms() + 1);
+        assertThat(asked.parkingCars()).isEqualTo(plain.parkingCars() + 1);
+        assertThat(asked.reasons()).anyMatch(reason -> reason.contains("extra bedroom"));
+        assertThat(asked.reasons()).anyMatch(reason -> reason.contains("additional parking bay"));
+        assertThat(asked.reasons())
+                .as("a rental floor changes the plan, so the customer must be told what it means")
+                .anyMatch(reason -> reason.contains("rental floor"));
+    }
+
+    @Test
+    void aPreferenceIsOnlyClaimedWhenItWasActuallyAskedFor() {
+        var plain = recommendationWith(List.of("Natural light"));
+        assertThat(plain.reasons()).noneMatch(reason -> reason.contains("extra bedroom"));
+        assertThat(plain.futureExpansion()).isFalse();
+        assertThat(recommendationWith(List.of("Future expansion")).futureExpansion()).isTrue();
+    }
+
+    private Recommendation recommendationWith(List<String> preferences) {
+        var project = service.create(new CreateProjectRequest("Priorities", StartMode.PLOT), "INDIVIDUAL");
+        service.updateBasicDetails(project.id(), new BasicDetailsRequest(40, 60, Facing.NORTH,
+                "Jaipur", 2, 8_000_000, Category.PREMIUM, new FamilyDetails(2, 2, 1, false),
+                preferences), "INDIVIDUAL");
+        return service.generateRecommendation(project.id(), "INDIVIDUAL");
+    }
+
     private BasicDetailsRequest details() {
         return details(HomeParameters.STANDARD_SETBACK);
     }

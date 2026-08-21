@@ -633,6 +633,63 @@ class GeometryEngineTest {
                 .anyMatch(element -> element.type().equals("GARDEN"));
     }
 
+    /**
+     * A garden on an ordinary plot, where the only ground deep enough to plant is the front setback.
+     *
+     * <p>The approach band used to be withheld from the garden whether or not a car ended up on it.
+     * A front setback shallower than a car is wide — which is most of them — therefore produced no
+     * parking *and* no garden, and "setbacks with garden" drew exactly what plain standard setbacks
+     * drew. The band is only spoken for when a bay is actually placed on it.</p>
+     */
+    @Test
+    void openSpaceDrawsAGardenWhenTheApproachIsTooShallowToParkOn() {
+        var parameters = new HomeParameters("BUNGALOW", "DOG_LEGGED", "NONE", 0, false, false,
+                false, 1, false, false, HomeParameters.OPEN_SPACE);
+        var details = new BasicDetailsRequest(30, 60, Facing.NORTH, "Jaipur", 1, 4_000_000,
+                Category.STANDARD, new FamilyDetails(2, 1, 0, false), List.of("Garden"), parameters);
+
+        var candidate = engine.generate("project-shallow-approach", 1, details, recommendation(),
+                versions()).getFirst();
+
+        var elements = candidate.geometry().siteElements();
+        // The setback ring here is 7.5 ft at the front: too shallow for the 8.5 ft a car needs
+        // across, so nothing parks outside and the band is free to be planted.
+        assertThat(elements).noneMatch(element -> element.type().equals("OUTDOOR_PARKING"));
+        assertThat(elements).anyMatch(element -> element.type().equals("GARDEN"));
+    }
+
+    /**
+     * An extension room is named for a size it can actually be furnished at.
+     *
+     * <p>Taking the next type off the list regardless of the ground it landed on drew a 239 sq ft
+     * study and a 144 sq ft store, against catalogue caps of 170 and 90.</p>
+     */
+    @Test
+    void extensionRoomsAreNamedForTheSizeTheyAreDrawnAt() {
+        var types = List.of("FAMILY_LOUNGE", "HOME_OFFICE", "MULTIPURPOSE_ROOM", "STORE");
+
+        // 8 x 7 = 56 sq ft: only the store's band reaches down this far.
+        assertThat(engine.extensionTypeFor(new PlotGeometry.Rect(0, 0, 8, 7), types, 0))
+                .isEqualTo("STORE");
+        // 16 x 15 = 240 sq ft: past the store and the home office, inside lounge and multipurpose.
+        assertThat(engine.extensionTypeFor(new PlotGeometry.Rect(0, 0, 16, 15), types, 0))
+                .isIn("FAMILY_LOUNGE", "MULTIPURPOSE_ROOM");
+        // 12 x 8 = 96 sq ft, 8 ft across: too narrow for a lounge or a multipurpose room.
+        assertThat(engine.extensionTypeFor(new PlotGeometry.Rect(0, 0, 12, 8), types, 0))
+                .isEqualTo("HOME_OFFICE");
+        // Larger than every band: the roomiest type is the honest name, never the next in the list.
+        assertThat(engine.extensionTypeFor(new PlotGeometry.Rect(0, 0, 30, 20), types, 1))
+                .isEqualTo("FAMILY_LOUNGE");
+
+        // Whatever the piece, the type it is given must be one the catalogue would draw it as.
+        for (var size : List.of(new double[] {8, 7}, new double[] {16, 15}, new double[] {12, 8})) {
+            var piece = new PlotGeometry.Rect(0, 0, size[0], size[1]);
+            var spec = RoomSpec.of(engine.extensionTypeFor(piece, types, 0));
+            assertThat(piece.area()).isBetween(spec.minArea() - .5, spec.maxArea() + .5);
+            assertThat(Math.min(piece.width(), piece.length())).isGreaterThanOrEqualTo(spec.minShortSide() - .01);
+        }
+    }
+
     private BasicDetailsRequest details(double width, int floors) {
         return details(width, floors, Facing.NORTH);
     }
@@ -765,6 +822,137 @@ class GeometryEngineTest {
                         inferred.courtyardRequired(), inferred.accessibleGroundFloor(),
                         inferred.parkingCars(), inferred.solarReady(), inferred.rainwaterHarvesting(),
                         plotUsage));
+    }
+
+    @Test
+    void theRoomProgrammeSizesTheRoomsRatherThanOnlyAuditingThem() {
+        // Until the variant reached the planner, the whole output of the parameter optimizer was
+        // read in one place: an audit that compared the finished drawing against it and printed the
+        // differences. Plot area, budget and household changed the programme and changed no wall.
+        var details = details(40, 2, Facing.NORTH);
+        var generous = engine.generate("p-generous", 1, details, recommendation(), versions(),
+                parameterSet(320, 190, 60));
+        var modest = engine.generate("p-modest", 1, details, recommendation(), versions(),
+                parameterSet(150, 95, 60));
+
+        assertThat(livingArea(generous)).isGreaterThan(livingArea(modest) + 20);
+    }
+
+    @Test
+    void aStripGivesTheLargerShareToWhicheverRoomTheProgrammeFavours() {
+        // A storey's plate is fixed, so rooms sharing a strip tile it exactly and one can only grow
+        // at another's expense. What the programme controls there is the split, not the total.
+        var details = details(40, 2, Facing.NORTH);
+        var kitchenLed = engine.generate("p-kitchen", 1, details, recommendation(), versions(),
+                parameterSet(230, 200, 32));
+        var utilityLed = engine.generate("p-utility", 1, details, recommendation(), versions(),
+                parameterSet(230, 70, 95));
+
+        assertThat(areaOf(kitchenLed, "KITCHEN") / areaOf(kitchenLed, "UTILITY"))
+                .as("a programme favouring the kitchen must draw it larger relative to the utility")
+                .isGreaterThan(areaOf(utilityLed, "KITCHEN") / areaOf(utilityLed, "UTILITY"));
+    }
+
+    @Test
+    void aProgrammeAskingForAnUnusableRoomIsClampedToWhatTheTypeIsUsableAt() {
+        // An optimizer may propose anything inside its own schema. What gets drawn is still bounded
+        // by the dimensions the type works at, so a 40 sq ft bedroom never reaches a customer.
+        var details = details(40, 2, Facing.NORTH);
+        var absurd = engine.generate("p-absurd", 1, details, recommendation(), versions(),
+                parameterSet(2_400, 20, 400));
+
+        for (var room : absurd.getFirst().geometry().rooms()) {
+            var spec = RoomSpec.of(room.type());
+            assertThat(room.area())
+                    .as("%s was drawn at %.1f sq ft", room.type(), room.area())
+                    .isBetween(spec.minArea() - 1, spec.maxArea() + 5);
+        }
+    }
+
+    @Test
+    void aPlannerWithoutAProgrammeDrawsExactlyWhatItDrewBefore() {
+        // The fallback path every existing caller uses: no variant, so room sizes come from the
+        // type catalogue and the geometry is unchanged by any of this.
+        var details = details(40, 2, Facing.NORTH);
+        var withoutVariant = engine.generate("p-same", 1, details, recommendation(), versions());
+        var withNullSet = engine.generate("p-same", 1, details, recommendation(), versions(), null);
+
+        assertThat(withNullSet.getFirst().geometry().rooms())
+                .isEqualTo(withoutVariant.getFirst().geometry().rooms());
+    }
+
+    private double livingArea(List<DrawingCandidate> candidates) {
+        return areaOf(candidates, "LIVING_ROOM");
+    }
+
+    private double areaOf(List<DrawingCandidate> candidates, String type) {
+        return candidates.getFirst().geometry().rooms().stream()
+                .filter(room -> type.equals(room.type())).mapToDouble(RoomGeometry::area).sum();
+    }
+
+    /** A parameter set whose three variants all ask for the given ground-floor areas. */
+    private PlanningParameterSet parameterSet(double living, double kitchen, double utility) {
+        var targets = List.of(
+                new PlanningParameterVariant.RoomTarget("LIVING_ROOM", "GROUND", 1, living, "REQUIRED"),
+                new PlanningParameterVariant.RoomTarget("KITCHEN", "GROUND", 1, kitchen, "REQUIRED"),
+                new PlanningParameterVariant.RoomTarget("UTILITY", "GROUND", 1, utility, "PREFERRED"),
+                new PlanningParameterVariant.RoomTarget("DINING", "GROUND", 1, 140, "REQUIRED"),
+                new PlanningParameterVariant.RoomTarget("BEDROOM", "FIRST", 1, 140, "REQUIRED"),
+                new PlanningParameterVariant.RoomTarget("BATHROOM", "GROUND", 1, 40, "REQUIRED"));
+        var weights = Map.of("budget", .2, "functionality", .3, "daylight", .2,
+                "accessibility", .15, "futureReadiness", .15);
+        var variants = List.of("BUDGET_OPTIMIZED", "BALANCED", "LIFESTYLE_OPTIMIZED").stream()
+                .map(strategy -> new PlanningParameterVariant(strategy, strategy + " option",
+                        "Shared living below; private rooms above", "DOG_LEGGED", "NONE", 1,
+                        false, false, true, 1, false, false, targets, weights,
+                        List.of("Sized to the plot", "Geometry remains deterministic")))
+                .toList();
+        return new PlanningParameterSet(null, "DETERMINISTIC", "test-rules", "home-parameters-1.1.0",
+                "home-parameters-1", false, List.of(), variants);
+    }
+
+    @Test
+    void candidateScoresAreMeasuredFromTheDrawingRatherThanFixedPerStrategy() {
+        // Every project ever generated scored its options 92/91/90 with the same vastu, daylight
+        // and efficiency numbers, because they were constants in the strategy table. A customer
+        // comparing options was reading the strategy's reputation, not their own home.
+        var narrow = engine.generate("s-narrow", 1, details(22, 1, Facing.NORTH),
+                recommendation(), versions());
+        var wide = engine.generate("s-wide", 1, details(55, 3, Facing.EAST),
+                recommendation(), versions());
+
+        var narrowScores = narrow.stream().map(DrawingCandidate::confidence).toList();
+        var wideScores = wide.stream().map(DrawingCandidate::confidence).toList();
+        assertThat(narrowScores).isNotEqualTo(wideScores);
+
+        // And the components are genuinely measured, not copied between plots.
+        assertThat(narrow.getFirst().spaceEfficiencyScore())
+                .isNotEqualTo(wide.getFirst().spaceEfficiencyScore());
+    }
+
+    @Test
+    void everyCandidateExplainsItselfWithSomethingMeasuredOnThisPlan() {
+        var candidates = engine.generate("s-explain", 1, details(40, 2, Facing.NORTH),
+                recommendation(), versions());
+
+        for (var candidate : candidates) {
+            assertThat(candidate.explanations())
+                    .as("%s must say what it did with this plot", candidate.strategy())
+                    .anyMatch(reason -> reason.contains("sq ft this plot can be planned on"));
+            assertThat(candidate.explanations())
+                    .anyMatch(reason -> reason.contains("passage, stair and shaft"));
+        }
+    }
+
+    @Test
+    void hardViolationsAreSubtractedRatherThanAveragedAway() {
+        // A layout that crosses the buildable line is not a well-rounded design with a caveat.
+        var rooms = engine.generate("s-clean", 1, details(40, 2, Facing.NORTH),
+                recommendation(), versions()).getFirst();
+        var score = CandidateScore.measure(rooms.geometry().rooms(), List.of(), null,
+                Facing.NORTH, 2);
+
+        assertThat(score.overall(null, 0)).isGreaterThan(score.overall(null, 3));
     }
 
     private Recommendation recommendation() {
