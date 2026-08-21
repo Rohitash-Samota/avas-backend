@@ -48,15 +48,26 @@ public class FloorPlanPdfService {
         try (var document = new PDDocument(); var output = new ByteArrayOutputStream()) {
             setMetadata(document.getDocumentInformation(), project, drawing);
             var floors = floorKeys(drawing);
-            // The site sheet leads the set: a reviewer checks the legal envelope before the plan
+            // The set opens with the layout sheet: every storey side by side, furnished, with the
+            // plot and the schedule of what the home holds. It is the drawing a customer reads. The
+            // sheets behind it are the drawing a builder works from, and both are needed — a
+            // presentation sheet carries no scale bar or door marks, and a working sheet cannot be
+            // held up against the storey above it.
+            var sheetCount = floors.size() + 1;
+            var layoutSheet = new PDPage(LayoutSheetRenderer.SHEET);
+            document.addPage(layoutSheet);
+            try (var canvas = new PDPageContentStream(document, layoutSheet)) {
+                new LayoutSheetRenderer(project, drawing, floors).render(canvas);
+            }
+            // The site sheet follows: a reviewer checks the legal envelope before the plan
             // that sits inside it. Older drawings carry no outline, so the set stays floors-only.
             var siteSheet = drawing.geometry().hasSiteContext();
-            var sheetCount = floors.size() + (siteSheet ? 1 : 0);
+            sheetCount += siteSheet ? 1 : 0;
             if (siteSheet) {
                 var page = new PDPage(PDRectangle.A4);
                 document.addPage(page);
                 try (var canvas = new PDPageContentStream(document, page)) {
-                    renderSitePlan(canvas, project, drawing, sheetCount);
+                    renderSitePlan(canvas, project, drawing, 2, sheetCount);
                 }
             }
             for (var index = 0; index < floors.size(); index++) {
@@ -64,7 +75,7 @@ public class FloorPlanPdfService {
                 document.addPage(page);
                 try (var canvas = new PDPageContentStream(document, page)) {
                     render(canvas, project, drawing, floors.get(index),
-                            index + 1 + (siteSheet ? 1 : 0), sheetCount);
+                            index + 2 + (siteSheet ? 1 : 0), sheetCount);
                 }
             }
             document.save(output);
@@ -668,14 +679,14 @@ public class FloorPlanPdfService {
      * buildable area the packer left unused.</p>
      */
     private void renderSitePlan(PDPageContentStream canvas, ProjectSummary project,
-            DrawingCandidate drawing, int sheetCount) throws IOException {
+            DrawingCandidate drawing, int sheetNumber, int sheetCount) throws IOException {
         fill(canvas, Color.WHITE, 0, 0, PDRectangle.A4.getWidth(), PDRectangle.A4.getHeight());
         var geometry = drawing.geometry();
 
         text(canvas, BOLD, 16, INK, "AVAS", 36, 804);
         text(canvas, REGULAR, 5.5f, MUTED, "ADAPTIVE HOME PLANNING", 36, 794);
-        textRight(canvas, REGULAR, 6, MUTED, "SERVER-GENERATED FLOOR SET  |  SHEET 1 OF " + sheetCount,
-                559, 802);
+        textRight(canvas, REGULAR, 6, MUTED,
+                "SERVER-GENERATED FLOOR SET  |  SHEET " + sheetNumber + " OF " + sheetCount, 559, 802);
         line(canvas, LINE, .8f, 36, 784, 559, 784);
         text(canvas, BOLD, 25, INK, "SITE PLAN", 36, 750);
         text(canvas, BOLD, 6.6f, CORAL, "PLOT "
@@ -737,9 +748,9 @@ public class FloorPlanPdfService {
         line(canvas, INK, 1f, northX, northY + 16, northX + 4, northY + 10);
         textCentered(canvas, BOLD, 6, INK, "N", northX, northY - 8);
 
-        renderCompactSummary(canvas, project, drawing, floorKeys(drawing).get(0), 1, sheetCount,
+        renderCompactSummary(canvas, project, drawing, floorKeys(drawing).get(0), sheetNumber, sheetCount,
                 36, 105, 523, 62);
-        renderDisclaimer(canvas, project, drawing, floorKeys(drawing).get(0), 1, sheetCount);
+        renderDisclaimer(canvas, project, drawing, floorKeys(drawing).get(0), sheetNumber, sheetCount);
     }
 
     /** Footprint as {x, y, width, length} recovered from the packed rooms, or null when empty. */

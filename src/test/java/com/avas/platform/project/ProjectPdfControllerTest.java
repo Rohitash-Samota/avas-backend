@@ -52,7 +52,8 @@ class ProjectPdfControllerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(new String(response.getBody(), 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         try (var document = Loader.loadPDF(response.getBody())) {
-            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            // Layout sheet, site plan, and one sheet per storey.
+            assertThat(document.getNumberOfPages()).isEqualTo(4);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }

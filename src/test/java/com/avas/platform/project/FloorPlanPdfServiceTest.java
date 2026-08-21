@@ -38,12 +38,17 @@ class FloorPlanPdfServiceTest {
         assertThat(new String(bytes, 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         assertThat(bytes.length).isGreaterThan(4_000);
         try (var document = Loader.loadPDF(bytes)) {
-            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            // Layout sheet, site plan, then one sheet per storey.
+            assertThat(document.getNumberOfPages()).isEqualTo(4);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }
             var text = new PDFTextStripper().getText(document);
             assertThat(text)
+                    .contains("DUPLEX HOUSE LAYOUT")
+                    .contains("PLOT DETAILS")
+                    .contains("SUMMARY")
+                    .contains("DOG-LEGGED STAIRCASE")
                     .contains("GARDEN THRESHOLD")
                     .contains("SELECTED CONCEPT")
                     .contains("AUTHORITATIVE FLOOR PLAN MAP")
@@ -53,8 +58,8 @@ class FloorPlanPdfServiceTest {
                     .contains("Ground Floor geometry")
                     .contains("First Floor geometry")
                     .contains("SITE PLAN")
-                    .contains("SHEET 2 / 3")
-                    .contains("SHEET 3 / 3")
+                    .contains("SHEET 3 / 4")
+                    .contains("SHEET 4 / 4")
                     .contains("Living Room")
                     .contains("Family Lounge")
                     .contains("ALL DIMENSIONS IN FEET")
@@ -84,12 +89,12 @@ class FloorPlanPdfServiceTest {
 
             try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()),
                     projects.drawings(project.id()).getFirst()))) {
-                assertThat(document.getNumberOfPages()).isEqualTo(floors + 1);
+                assertThat(document.getNumberOfPages()).isEqualTo(floors + 2);
                 for (var page : document.getPages()) {
                     assertThat(page.getResources().getXObjectNames()).isEmpty();
                 }
                 var text = new PDFTextStripper().getText(document);
-                assertThat(text).contains("SHEET " + (floors + 1) + " / " + (floors + 1));
+                assertThat(text).contains("SHEET " + (floors + 2) + " / " + (floors + 2));
                 if (floors == 3) assertThat(text).contains("SECOND FLOOR PLAN");
             }
         }
@@ -120,7 +125,7 @@ class FloorPlanPdfServiceTest {
         var legacy = groundOnly(complete, false);
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), legacy))) {
-            assertThat(document.getNumberOfPages()).isEqualTo(1);
+            assertThat(document.getNumberOfPages()).isEqualTo(2);
             assertThat(document.getPage(0).getResources().getXObjectNames()).isEmpty();
             assertThat(new PDFTextStripper().getText(document))
                     .contains("LEGACY INCOMPLETE FLOOR SET")
@@ -155,7 +160,7 @@ class FloorPlanPdfServiceTest {
         var bytes = pdf.generate(projects.get(project.id()), drawing);
 
         try (var document = Loader.loadPDF(bytes)) {
-            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            assertThat(document.getNumberOfPages()).isEqualTo(4);
             for (var page : document.getPages()) {
                 assertThat(page.getResources().getXObjectNames()).isEmpty();
             }
@@ -177,7 +182,7 @@ class FloorPlanPdfServiceTest {
         projects.updateBasicDetails(project.id(), details(50, 70, Facing.EAST, 3), "INDIVIDUAL");
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), historical))) {
-            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            assertThat(document.getNumberOfPages()).isEqualTo(4);
             var text = new PDFTextStripper().getText(document);
             assertThat(text)
                     .contains("2-FLOOR COMPLETE SET")
@@ -201,8 +206,9 @@ class FloorPlanPdfServiceTest {
         var malformed = floorsOnly(projects.drawings(project.id()).getFirst(), List.of("FIRST", "SECOND"), 2);
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), malformed))) {
-            // Rebuilt without site context, so the set is floor sheets only and carries no site plan.
-            assertThat(document.getNumberOfPages()).isEqualTo(2);
+            // Rebuilt without site context, so the set is the layout sheet and the floor sheets,
+            // and carries no site plan.
+            assertThat(document.getNumberOfPages()).isEqualTo(3);
             assertThat(new PDFTextStripper().getText(document))
                     .contains("LEGACY INCOMPLETE FLOOR SET")
                     .contains("REGENERATE REQUIRED")
@@ -227,7 +233,7 @@ class FloorPlanPdfServiceTest {
         var drawing = projects.drawings(project.id()).getFirst();
 
         try (var document = Loader.loadPDF(pdf.generate(projects.get(project.id()), drawing))) {
-            assertThat(document.getNumberOfPages()).isEqualTo(3);
+            assertThat(document.getNumberOfPages()).isEqualTo(4);
             var text = new PDFTextStripper().getText(document);
             assertThat(text)
                     .contains("SITE PLAN")

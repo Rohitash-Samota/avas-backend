@@ -54,17 +54,34 @@ public record HomeParameters(
 
     public static HomeParameters defaults(int floors, double plotArea, boolean seniorPresent,
             java.util.List<String> preferences) {
+        return defaults(floors, plotArea, seniorPresent, preferences, SpecificationTier.STANDARD);
+    }
+
+    /**
+     * The parameters a brief implies, at the finish tier the brief was priced at.
+     *
+     * <p>These are the values a customer sees pre-filled and remains free to change; the tier only
+     * moves the starting point. A home costed as luxury that defaulted to one car bay and no lift
+     * was quoting one house and offering to draw another, and the customer had no way to know which
+     * of the two the price belonged to.</p>
+     */
+    public static HomeParameters defaults(int floors, double plotArea, boolean seniorPresent,
+            java.util.List<String> preferences, SpecificationTier tier) {
         var normalized = preferences == null ? java.util.List.<String>of() : preferences.stream()
                 .map(value -> value.toLowerCase(java.util.Locale.ROOT)).toList();
+        var specification = tier == null ? SpecificationTier.STANDARD : tier;
+        var luxury = specification == SpecificationTier.LUXURY;
         return new HomeParameters(
                 floors == 1 ? "BUNGALOW" : floors == 2 ? "DUPLEX" : "MULTI_STOREY",
                 "DOG_LEGGED",
-                floors > 1 && (floors > 2 || seniorPresent) ? "FUTURE_SHAFT" : "NONE",
-                floors > 1 ? 1 : 0,
-                normalized.stream().anyMatch(value -> value.contains("terrace")),
+                // A lift is the one provision that cannot be added later without opening the slab,
+                // so at the tier that pays for it the shaft is offered by default on every duplex.
+                floors > 1 && (floors > 2 || seniorPresent || luxury) ? "FUTURE_SHAFT" : "NONE",
+                floors > 1 ? (luxury ? floors - 1 : 1) : 0,
+                normalized.stream().anyMatch(value -> value.contains("terrace")) || luxury,
                 normalized.stream().anyMatch(value -> value.contains("courtyard") || value.contains("garden")),
                 seniorPresent,
-                plotArea >= 1_800 ? 2 : 1,
+                specification.minimumParkingBays(plotArea >= 1_800 ? 2 : 1),
                 normalized.stream().anyMatch(value -> value.contains("solar")),
                 normalized.stream().anyMatch(value -> value.contains("rainwater")),
                 FULL_PLOT);

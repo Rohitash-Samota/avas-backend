@@ -86,6 +86,17 @@ public record PlanningParameterSet(
     private static List<PlanningParameterVariant.RoomTarget> deterministicRoomTargets(
             BasicDetailsRequest details, BuildableEnvelope envelope, int strategyIndex) {
         var targets = new java.util.ArrayList<PlanningParameterVariant.RoomTarget>();
+        // What the chosen finish tier expects this home to contain, so the programme a customer is
+        // shown names the arrival sequence, the guest WC and the dressed suite their money buys
+        // rather than describing the same house at every price.
+        var tier = SpecificationTier.of(details.category(), details.budget(),
+                details.plotArea() * details.floors() * .82d);
+        if (tier.coveredVerandah()) {
+            targets.add(target("VERANDAH", "GROUND", 1, area(strategyIndex, 45, 55, 70), "OPTIONAL"));
+        }
+        if (tier.entranceFoyer()) {
+            targets.add(target("FOYER", "GROUND", 1, area(strategyIndex, 48, 60, 75), "PREFERRED"));
+        }
         targets.add(target("LIVING_ROOM", "GROUND", 1,
                 area(strategyIndex, 160, 200, 240), "REQUIRED"));
         targets.add(target("DINING", "GROUND", 1,
@@ -132,7 +143,11 @@ public record PlanningParameterSet(
                 count, area(strategyIndex, 40, 45, 55), "PREFERRED")));
 
         if (details.family().regularGuests()) {
-            targets.add(target("FLEX_GUEST_ROOM", floors.getLast(), 1,
+            // FLEX_ROOM, not FLEX_GUEST_ROOM: the latter is not in the RoomSpec catalogue, so the
+            // target was sized from the fallback dimensions and could never match a planned room.
+            // A guest room the programme asked for and the planner had no name for was simply
+            // absent from every drawing, and the audit had nothing to compare it against.
+            targets.add(target("FLEX_ROOM", floors.getLast(), 1,
                     area(strategyIndex, 105, 120, 140), "PREFERRED"));
         }
         if (details.floors() > 1 && strategyIndex > 0) {
@@ -141,6 +156,21 @@ public record PlanningParameterSet(
         }
         targets.add(target("UTILITY", "GROUND", 1,
                 area(strategyIndex, 35, 50, 65), "PREFERRED"));
+        if (tier.guestToilet()) {
+            targets.add(target("TOILET", "GROUND", 1, area(strategyIndex, 18, 22, 28), "PREFERRED"));
+        }
+        if (tier.dedicatedStore()) {
+            targets.add(target("STORE", "GROUND", 1, area(strategyIndex, 30, 38, 48), "OPTIONAL"));
+        }
+        if (tier.separateLaundry()) {
+            targets.add(target("LAUNDRY", "GROUND", 1, area(strategyIndex, 32, 40, 50), "OPTIONAL"));
+        }
+        if (tier.masterDressingRoom()) {
+            // On the floor the master is planned on, which is the ground floor only when there is
+            // no upper floor to put it on.
+            targets.add(target("DRESSING_ROOM", details.floors() > 1 ? "FIRST" : "GROUND", 1,
+                    area(strategyIndex, 36, 45, 58), "PREFERRED"));
+        }
 
         var balconies = details.parameters().balconyCount();
         if (balconies > 0) {
@@ -191,7 +221,11 @@ public record PlanningParameterSet(
         var plannable = envelope != null ? envelope.plannableArea() : details.plotArea();
         var indoor = plannable * details.floors() * (1 - FloorPlanner.OUTDOOR_SHARE);
         var affordable = details.budget() / (double) buildRate(details.category());
-        var scale = clamp(Math.min(indoor, affordable) / wanted, MINIMUM_SCALE, MAXIMUM_SCALE);
+        // The tier's own generosity is applied to what the project can carry, not on top of it, so
+        // a luxury brief buys larger rooms only while the plot and the budget still cover them.
+        var tier = SpecificationTier.of(details.category(), details.budget(), indoor);
+        var scale = clamp(Math.min(indoor, affordable) * tier.generosity() / wanted,
+                MINIMUM_SCALE, MAXIMUM_SCALE);
 
         var fitted = new java.util.ArrayList<PlanningParameterVariant.RoomTarget>(base.size());
         for (var target : base) {

@@ -32,9 +32,13 @@ public record BasicDetailsRequest(
             plotLength = round(box.length());
             roadFacing = plotBoundary.roadFacing();
         }
+        var area = plotBoundary != null ? plotBoundary.area() : plotWidth * plotLength;
         parameters = parameters == null
-                ? HomeParameters.defaults(floors, plotBoundary != null ? plotBoundary.area() : plotWidth * plotLength,
-                        family != null && family.seniorCitizens() > 0, preferences)
+                ? HomeParameters.defaults(floors, area, family != null && family.seniorCitizens() > 0,
+                        preferences,
+                        // The tier the budget actually buys, so an unspecified brief starts from the
+                        // provisions its own money covers rather than from the cheapest assumption.
+                        SpecificationTier.of(category, budget, area * floors * 0.82d))
                 : parameters;
     }
 

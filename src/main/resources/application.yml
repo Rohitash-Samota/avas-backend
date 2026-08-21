@@ -82,7 +82,12 @@ avas:
     enabled: ${AVAS_AI_ENABLED:false}
     base-url: ${AVAS_AI_BASE_URL:http://127.0.0.1:8090}
     service-key: ${AVAS_AI_SERVICE_KEY:}
-    timeout-seconds: ${AVAS_AI_TIMEOUT_SECONDS:25}
+    # A reasoning model composing three complete room programmes takes longer than a plain
+    # completion, and this was the shorter of the two ceilings: every call was abandoned here at 25
+    # seconds and answered from deterministic rules, which reads exactly like a model that was never
+    # configured. Generation is synchronous, so this is also the longest a customer waits before the
+    # deterministic programme answers instead — lower it if that matters more than reaching a model.
+    timeout-seconds: ${AVAS_AI_TIMEOUT_SECONDS:90}
     # Reading a plot drawing uploads the file itself, so it is enabled separately from parameter
     # optimization and is given the longer timeout an image or PDF reading needs.
     outline-enabled: ${AVAS_AI_OUTLINE_ENABLED:false}

@@ -26,7 +26,7 @@ Browser
 
 - `auth` owns users, unique usernames, optional email, normalized mobile numbers, roles, permissions, password hashes, JWT issue/validation, rotating hashed refresh tokens and optional Google OAuth account creation. Its unified identifier resolver supports username, unambiguous full name, mobile and email while privileged roles remain admin-provisioned.
 - `security` owns request authentication and validates that `X-Active-Role` is among the user’s assigned roles.
-- `project` owns the planning state machine and native deterministic geometry engine.
+- `project` owns the planning state machine and native deterministic geometry engine. `SpecificationTier` holds what a finish tier means as a room programme rather than only as a rate, and is read by both the parameter targets a customer is shown and the planner that places the walls. `ApproachParking` resolves where the cars stand once, so the layout and the site plan cannot disagree about it. `LayoutSheetRenderer` draws the customer-facing layout sheet that leads the PDF set.
 - `project.persistence` owns durable project, requirement snapshot, drawing artifact, estimate artifact and append-only project audit entities.
 - `commerce` owns catalog products, server-side price calculation, orders/items, payment sessions/audit, refunds, wallets and wallet transactions.
 - `knowledge` owns versioned planning rules, jurisdictional sources and evidence metadata in MongoDB.

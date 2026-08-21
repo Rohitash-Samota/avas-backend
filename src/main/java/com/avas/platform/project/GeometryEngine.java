@@ -116,7 +116,14 @@ class GeometryEngine {
             var violations = new ArrayList<>(validate(details.plotWidth(), details.plotLength(), rooms));
             violations.addAll(validateEnvelope(envelope, rooms));
             violations.addAll(validateDocument(details.floors(), rooms, doors, windows));
-            var programmeGaps = programmeGaps(recommendation, rooms, builtUpArea, optionParameters, variant);
+            // Planned before the audit rather than at the point the document is assembled, because
+            // open parking on the approach is a bay the family actually gets. Counting only indoor
+            // rectangles reported every plot that parks outside — which is most of them, and every
+            // plot the tier planned a driveway for — as short of its own recommended bay count.
+            var siteElements = siteElements(envelope, details.roadFacing(), optionParameters,
+                    details.category());
+            var programmeGaps = programmeGaps(recommendation, rooms, siteElements, builtUpArea,
+                    optionParameters, variant);
             violations.addAll(programmeGaps);
             // Measured from the layout that was just placed, rather than read off the strategy.
             // These used to be constants, so all three options scored the same on every project
@@ -231,8 +238,7 @@ class GeometryEngine {
                     new GeometryDocument("FEET", details.plotWidth(), details.plotLength(), rooms,
                             doors, windows, envelope.plot().vertices(), envelope.buildableOutline(),
                             envelope.setbacks(), envelope.plotArea(), envelope.buildableArea(),
-                            siteElements(envelope, details.roadFacing(), optionParameters,
-                                    details.category())),
+                            siteElements),
                     List.copyOf(violations),
                     softRecommendations(envelope, planner.notes(),
                             daylightNotes(envelope, rooms, windows, details.roadFacing())),
@@ -314,14 +320,8 @@ class GeometryEngine {
     }
 
     /** Depth a car needs to stand clear of the building, in feet. */
-    private static final double CAR_LENGTH = 16d;
-    private static final double CAR_WIDTH = 8.5d;
     /** Below this a strip of open ground is a margin, not somewhere a family would put anything. */
     private static final double USABLE_OPEN_DEPTH = 6d;
-    /** Shortest side of open ground worth recovering as a named site element, in feet. */
-    private static final double MINIMUM_OPEN_SIDE = 3d;
-    /** Floor area below which open ground is margin rather than something to draw. */
-    private static final double MINIMUM_OPEN_AREA = 30d;
 
     /**
      * Plans the open ground: where the cars stand, and what the rest of the plot becomes.
@@ -350,44 +350,16 @@ class GeometryEngine {
             return List.of();
         }
         var elements = new ArrayList<SiteElement>();
-        // Whether the approach band ends up carrying cars. A front setback too shallow to stand a
-        // car in is still the deepest open ground on the plot, and on "setbacks with garden" it is
-        // usually the only piece a garden will fit on.
-        var approachParked = false;
-        var horizontalApproach = facing == Facing.NORTH || facing == Facing.SOUTH;
-        // The approach is the largest piece of open ground on the road side, because that is the
-        // only ground a car can reach from the street.
-        var approach = open.stream().filter(piece -> onRoadSide(envelope, piece, facing))
-                .max(java.util.Comparator.comparingDouble(PlotGeometry.Rect::area)).orElse(null);
-        if (approach != null && parameters.parkingCars() > 0) {
-            var approachDepth = horizontalApproach ? approach.length() : approach.width();
-            var approachRun = horizontalApproach ? approach.width() : approach.length();
-            // A front setback is usually shallower than a car is long, which is why so many Indian
-            // homes park along the boundary rather than nose-in. Both are real arrangements, so the
-            // depth that is actually available chooses between them instead of ruling parking out.
-            var noseIn = approachDepth >= CAR_LENGTH;
-            var bayDepth = noseIn ? CAR_LENGTH : CAR_WIDTH;
-            var runPerCar = noseIn ? CAR_WIDTH : CAR_LENGTH;
-            var parkedOutside = approachDepth < CAR_WIDTH ? 0
-                    : Math.min(parameters.parkingCars(), (int) Math.floor(approachRun / runPerCar));
-            if (parkedOutside > 0) {
-                approachParked = true;
-                var bayRun = parkedOutside * runPerCar;
-                var label = parkedOutside + " car open parking";
-                if (horizontalApproach) {
-                    // Hard against the house, so what is left of the approach is driveway rather
-                    // than a bay stranded at the boundary with a car's length of nothing behind it.
-                    var bayY = facing == Facing.SOUTH
-                            ? approach.y() + approach.length() - bayDepth : approach.y();
-                    elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
-                            approach.x() + (approach.width() - bayRun) / 2, bayY, bayRun, bayDepth));
-                } else {
-                    var bayX = facing == Facing.WEST
-                            ? approach.x() + approach.width() - bayDepth : approach.x();
-                    elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING", label,
-                            bayX, approach.y() + (approach.length() - bayRun) / 2, bayDepth, bayRun));
-                }
-            }
+        // The same decision the planner sized its ground floor against, so the bays drawn on the
+        // approach and the bays the building did not have to carry are one answer, not two.
+        var approachParking = ApproachParking.decide(envelope, facing, parameters);
+        var bayRectangle = approachParking.bayRectangle(envelope, facing);
+        var approach = approachParking.area();
+        var approachParked = bayRectangle != null;
+        if (bayRectangle != null) {
+            elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING",
+                    approachParking.bays() + " car open parking", bayRectangle.x(), bayRectangle.y(),
+                    bayRectangle.width(), bayRectangle.length()));
         }
 
         // Garden is a finish-tier promise, so it is only drawn where the specification carries it —
@@ -418,23 +390,9 @@ class GeometryEngine {
      * standing in it.</p>
      */
     private List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope) {
-        var built = new ArrayList<PlotGeometry.Rect>();
-        built.add(new PlotGeometry.Rect(envelope.footprintX(), envelope.footprintY(),
-                envelope.footprintWidth(), envelope.footprintLength()));
-        built.addAll(envelope.extensionZones());
-        return PlotGeometry.residualRectangles(envelope.plot().vertices(), built,
-                MINIMUM_OPEN_SIDE, MINIMUM_OPEN_AREA);
+        return ApproachParking.openGround(envelope);
     }
 
-    /** True when this piece of open ground lies between the building and the road. */
-    private boolean onRoadSide(BuildableEnvelope envelope, PlotGeometry.Rect piece, Facing facing) {
-        return switch (facing) {
-            case NORTH -> piece.y() >= envelope.footprintY() + envelope.footprintLength() - GAP;
-            case SOUTH -> piece.y() + piece.length() <= envelope.footprintY() + GAP;
-            case EAST -> piece.x() >= envelope.footprintX() + envelope.footprintWidth() - GAP;
-            case WEST -> piece.x() + piece.width() <= envelope.footprintX() + GAP;
-        };
-    }
 
     private boolean countsAsBuiltUp(RoomGeometry room) {
         return switch (room.type()) {
@@ -443,13 +401,14 @@ class GeometryEngine {
         };
     }
 
-    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms, int builtUpArea,
-            HomeParameters parameters, PlanningParameterVariant variant) {
+    private List<String> programmeGaps(Recommendation recommendation, List<RoomGeometry> rooms,
+            List<SiteElement> siteElements, int builtUpArea, HomeParameters parameters,
+            PlanningParameterVariant variant) {
         var gaps = new ArrayList<String>();
         var bedrooms = rooms.stream().filter(room -> room.type().contains("BEDROOM")).count();
         var attachedBathrooms = rooms.stream().filter(room -> room.type().contains("ATTACHED_BATHROOM")).count();
         var commonBathrooms = rooms.stream().filter(room -> "BATHROOM".equals(room.type())).count();
-        var parkingBays = representedParkingBays(rooms);
+        var parkingBays = representedParkingBays(rooms, siteElements);
         if (bedrooms != recommendation.bedrooms()) {
             gaps.add("Programme gap: " + bedrooms + " of " + recommendation.bedrooms()
                     + " recommended bedrooms represented");
@@ -505,7 +464,7 @@ class GeometryEngine {
                 && rooms.stream().noneMatch(room -> room.type().contains("COURTYARD"))) {
             gaps.add("Programme gap: requested courtyard is not represented");
         }
-        var representedParking = representedParkingBays(rooms);
+        var representedParking = parkingBays;
         if (representedParking < parameters.parkingCars()) {
             gaps.add("Programme gap: " + representedParking + " of " + parameters.parkingCars()
                     + " requested parking bays represented");
@@ -514,16 +473,34 @@ class GeometryEngine {
         return List.copyOf(gaps);
     }
 
-    private long representedParkingBays(List<RoomGeometry> rooms) {
-        // One parking programme rectangle may intentionally hold multiple bays. Capacity must be
-        // dimension-aware so a long four-foot strip can never masquerade as usable parking area.
-        return rooms.stream().filter(room -> room.type().contains("PARKING"))
-                .mapToLong(room -> Math.min(3, Math.max(
-                        (long) Math.floor(room.width() / 8d)
-                                * (long) Math.floor(room.length() / 16d),
-                        (long) Math.floor(room.width() / 16d)
-                                * (long) Math.floor(room.length() / 8d))))
-                .sum();
+    /**
+     * Bays this plan actually gives the family, indoors and on the approach alike.
+     *
+     * <p>A car standing in the front setback is parked. Measuring only the rectangles inside the
+     * building said otherwise, so a layout that deliberately kept the cars outside — which is the
+     * arrangement that buys the ground floor its rooms back — was reported as failing to provide
+     * the parking it had just planned.</p>
+     */
+    private long representedParkingBays(List<RoomGeometry> rooms, List<SiteElement> siteElements) {
+        var indoors = rooms.stream().filter(room -> room.type().contains("PARKING"))
+                .mapToLong(room -> bayCapacity(room.width(), room.length())).sum();
+        var outdoors = siteElements == null ? 0L : siteElements.stream()
+                .filter(element -> element.type().contains("PARKING"))
+                .mapToLong(element -> bayCapacity(element.width(), element.length())).sum();
+        return indoors + outdoors;
+    }
+
+    /**
+     * Cars a rectangle of this size can stand, whichever way they are arranged.
+     *
+     * <p>Dimension-aware rather than area-aware, so a long four-foot strip can never masquerade as
+     * usable parking. Capped per rectangle because beyond three abreast the bays need an aisle the
+     * conceptual plan is not modelling.</p>
+     */
+    private long bayCapacity(double width, double length) {
+        return Math.min(3, Math.max(
+                (long) Math.floor(width / 8d) * (long) Math.floor(length / 16d),
+                (long) Math.floor(width / 16d) * (long) Math.floor(length / 8d)));
     }
 
     private List<String> roomTargetGaps(List<RoomGeometry> rooms, PlanningParameterVariant variant) {
@@ -1500,6 +1477,10 @@ class GeometryEngine {
      * private bathroom opens off the bedroom it serves, habitable rooms open off the passage, and
      * nothing is entered through a bedroom or a parking bay if any other wall will do.</p>
      */
+    /** The rooms that legitimately open off a bedroom, because they belong to it. */
+    private static final java.util.Set<String> BEDROOM_SUITE =
+            java.util.Set.of("ATTACHED_BATHROOM", "DRESSING_ROOM", "STORE", "BALCONY", "TERRACE");
+
     private double doorCost(RoomGeometry from, RoomGeometry to) {
         var fromType = from.type();
         var toType = to.type();
@@ -1509,7 +1490,14 @@ class GeometryEngine {
         }
         if ("ATTACHED_BATHROOM".equals(fromType)) return 60;
         if (RoomSpec.CORRIDOR.equals(toType) || RoomSpec.CORRIDOR.equals(fromType)) return 5;
-        if (fromType.endsWith("BEDROOM")) return 35;
+        if (fromType.endsWith("BEDROOM")) {
+            // Through a bedroom you reach that bedroom's own rooms. Anything else — a guest WC, a
+            // store, the stair — is a route through somebody's private room, and the tree should
+            // take any other way round before it takes this one. Costed rather than forbidden
+            // because a room with no other neighbour still has to be reachable somehow, and a plan
+            // that leaves it sealed is worse than one that reports an awkward door.
+            return BEDROOM_SUITE.contains(toType) ? 35 : 400;
+        }
         if (RoomSpec.isOutdoor(fromType)) return 25;
         if ("LIVING_ROOM".equals(fromType) || "DINING".equals(fromType)
                 || "FAMILY_LOUNGE".equals(fromType)) return 10;

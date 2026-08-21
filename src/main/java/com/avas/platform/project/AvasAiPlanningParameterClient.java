@@ -32,7 +32,7 @@ class AvasAiPlanningParameterClient implements PlanningParameterClient {
             @Value("${avas.ai.base-url:http://127.0.0.1:8090}") String baseUrl,
             @Value("${avas.ai.service-key:}") String serviceKey,
             @Value("${avas.ai.enabled:false}") boolean enabled,
-            @Value("${avas.ai.timeout-seconds:25}") long timeoutSeconds) {
+            @Value("${avas.ai.timeout-seconds:90}") long timeoutSeconds) {
         this.http = AvasAiHttp.client(builder, timeoutSeconds);
         this.json = json;
         this.url = baseUrl.replaceAll("/$", "") + "/api/v1/plan-parameters";

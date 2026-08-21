@@ -45,6 +45,10 @@ record RoomSpec(
             Map.entry("DINING", new RoomSpec(9d, 10d, 140d, 90d, 260d, 2)),
             Map.entry("FAMILY_LOUNGE", new RoomSpec(10d, 11d, 170d, 110d, 320d, 3)),
             Map.entry("PORCH", new RoomSpec(6d, 8d, 90d, 48d, 220d, 4)),
+            // Arrival. A foyer under about five feet clear is a doormat, not a hall you can turn
+            // in with a bag; a verandah shallower than five feet holds nobody sitting down.
+            Map.entry("FOYER", new RoomSpec(5.5d, 7d, 62d, 38d, 130d, 3)),
+            Map.entry("VERANDAH", new RoomSpec(5d, 7d, 58d, 34d, 150d, 4)),
             // Service zone.
             Map.entry("KITCHEN", new RoomSpec(7.5d, 9d, 115d, 68d, 210d, 1)),
             Map.entry("UTILITY", new RoomSpec(5d, 6d, 48d, 30d, 96d, 4)),
@@ -87,6 +91,23 @@ record RoomSpec(
         return CATALOGUE.getOrDefault(type == null ? "" : type.toUpperCase(Locale.ROOT), FALLBACK);
     }
 
+    /**
+     * True when this catalogue holds real dimensions for the type, rather than the fallback.
+     *
+     * <p>{@link #of} answering for everything is right where a size is needed and wrong where the
+     * question is whether a space can be drawn at all. A proposal naming {@code DRAWING_ROOM} would
+     * otherwise be placed at fallback dimensions, labelled with a name no renderer has furniture
+     * for, and counted in the schedule as though the platform understood it.</p>
+     */
+    static boolean knows(String type) {
+        return type != null && CATALOGUE.containsKey(type.toUpperCase(Locale.ROOT));
+    }
+
+    /** Every space this engine can place, for the callers that have to publish the vocabulary. */
+    static java.util.Set<String> catalogue() {
+        return java.util.Set.copyOf(CATALOGUE.keySet());
+    }
+
     static boolean isOutdoor(String type) {
         return OUTDOOR_TYPES.contains(type);
     }
@@ -123,6 +144,37 @@ record RoomSpec(
     double maxRun(double across) {
         var proportion = across * proportionLimit();
         return Math.max(minRun(across), Math.min(maxArea / Math.max(.01, across), proportion));
+    }
+
+    /**
+     * The widest this space may be drawn across a strip, given it may only get its shortest run.
+     *
+     * <p>Bounded by proportion rather than by area, because area alone is not enough: a store is
+     * allowed ninety square feet and its shortest usable run is four and a half, so an area-only cap
+     * would permit a twenty-by-four-and-a-half store — the correct area, and a cupboard corridor.
+     * The bound is the run it would get multiplied by the proportion the space stops reading at, so
+     * a room that ends up at its minimum run is still a room. A longer run only improves it.</p>
+     */
+    double maxAcross(double across) {
+        var run = minRun(across);
+        if (Double.isNaN(run) || run <= .01) return Double.NaN;
+        return Math.max(minShortSide, Math.min(maxArea / run, run * proportionLimit()));
+    }
+
+    /**
+     * The shortest run at which this space stops reading as a passage across a strip this wide.
+     *
+     * <p>The counterpart to {@link #maxAcross} for a room that has no neighbour to give width to.
+     * Alone across its strip its width is fixed by the strip, so the only thing left that can stop
+     * it being a corridor is depth — a store eighteen feet across needs five of it.</p>
+     */
+    double proportionateRun(double across) {
+        return across / proportionLimit();
+    }
+
+    /** The longest run this space may be given at {@code across} feet wide before it reads as one. */
+    double proportionateMaxRun(double across) {
+        return across * proportionLimit();
     }
 
     /** The run this space would like in a strip of {@code across} feet. */
