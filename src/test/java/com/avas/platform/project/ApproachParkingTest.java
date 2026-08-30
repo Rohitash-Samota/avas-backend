@@ -45,18 +45,32 @@ class ApproachParkingTest {
     }
 
     @Test
-    void aShallowApproachBringsTheCarsIndoorsAndGivesThemTheirRealFrontage() {
-        // A 7.5 ft front setback cannot hold a car at any angle, so the building carries them — and
-        // two cars abreast need seventeen feet of frontage. Sized by area alone the bay came out
-        // twelve feet wide, which is one parking space and a wasted slab.
+    void aShallowApproachMovesTheBuildingBackRatherThanTakingTheCarsIndoors() {
+        // A 7.5 ft front setback is a foot short of the width of a car, and being a foot short used
+        // to cost the ground floor a seventeen-foot garage — three hundred and forty square feet of
+        // structure, taken from the living room's frontage. The building gives up the foot instead.
         var candidate = plan(40, 60).getFirst();
-        var bay = candidate.geometry().rooms().stream()
-                .filter(room -> room.type().contains("PARKING")).findFirst().orElseThrow();
+
+        assertThat(candidate.geometry().rooms())
+                .as("nothing is parked inside the building")
+                .noneMatch(room -> room.type().contains("PARKING"));
+        assertThat(candidate.geometry().siteElements())
+                .anyMatch(element -> element.type().equals("OUTDOOR_PARKING"));
+        assertThat(candidate.softRecommendations())
+                .as("the customer is told the building moved, and why")
+                .anyMatch(note -> note.contains("set back a further")
+                        && note.contains("stand on the approach"));
+    }
+
+    @Test
+    void aPlotTooTightToBothBuildAndParkOnKeepsTheHomeAndBringsTheCarsIndoors() {
+        // The hold-back is never taken at the cost of a plate too narrow to plan rooms against.
+        var candidate = plan(22, 40).getFirst();
 
         assertThat(candidate.geometry().siteElements())
-                .noneMatch(element -> element.type().contains("PARKING"));
-        assertThat(Math.max(bay.width(), bay.length())).isGreaterThanOrEqualTo(17);
-        assertThat(Math.min(bay.width(), bay.length())).isGreaterThanOrEqualTo(16);
+                .noneMatch(element -> element.type().equals("OUTDOOR_PARKING"));
+        assertThat(candidate.softRecommendations())
+                .noneMatch(note -> note.contains("set back a further"));
     }
 
     @Test

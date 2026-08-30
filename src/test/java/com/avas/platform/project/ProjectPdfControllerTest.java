@@ -1,7 +1,9 @@
 package com.avas.platform.project;
 
 import com.avas.platform.auth.AvasPrincipal;
+import com.avas.platform.project.persistence.ProjectPersistenceService;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.text.PDFTextStripper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
@@ -11,12 +13,15 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
 import static com.avas.platform.security.ActiveRoleFilter.ACTIVE_ROLE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ProjectPdfControllerTest {
     private ProjectService projects;
@@ -28,7 +33,15 @@ class ProjectPdfControllerTest {
     void setUp() {
         projects = new ProjectService(new GeometryEngine(), "RJ-JDA-2026.08", "AVAS-KB-2026.08",
                 "layout-heuristic-1.5.0", "planning-estimate-1.2.0");
-        controller = new ProjectController(projects, null, new FloorPlanPdfService(), new PlotDocumentService());
+        controller = new ProjectController(projects, null, new FloorPlanPdfService(),
+                new PlotDocumentService(),
+                // No image model in a unit test, which is also the ordinary production
+                // shape: the render endpoint answers 204 and the measured plan is shown.
+                (tenantId, contextVersion, project, drawing, style, brief, floor, options)
+                        -> ConceptRenderClient.Outcome.notConfigured(),
+                // No render store in a unit test about PDFs. The controller treats its absence as
+                // "nothing stored", which is exactly the cold-cache path it takes in production.
+                null);
         owner = UUID.randomUUID();
         var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL",
                 owner, "tenant-one");

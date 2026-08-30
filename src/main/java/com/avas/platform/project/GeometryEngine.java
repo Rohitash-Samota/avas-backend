@@ -19,6 +19,25 @@ import java.util.Objects;
 @Component
 class GeometryEngine {
     /**
+     * Where the arrangement is decided, when it is decided remotely. May be {@code null}.
+     *
+     * <p>Null in every test that constructs the engine directly, and whenever
+     * {@code avas.ai.layout-enabled} is false — which is the default. The engine then plans through
+     * {@link FloorPlanner} exactly as it always has, so this field changes nothing about a
+     * deployment that has not asked for it.</p>
+     */
+    private final LayoutClient layoutClient;
+
+    GeometryEngine() {
+        this(null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    GeometryEngine(LayoutClient layoutClient) {
+        this.layoutClient = layoutClient;
+    }
+
+    /**
      * Current geometry document schema.
      *
      * <p>{@code multi-floor-3} replaced the fixed grid packer with the programme-driven
@@ -66,7 +85,7 @@ class GeometryEngine {
         return generate(projectId, version, details, recommendation, versions, parameterSet,
                 BuildableEnvelope.derive(boundary,
                         SetbackRule.forUsage(boundary, details.floors(), details.parameters().plotUsage()),
-                        details.floors()));
+                        details.floors(), details.roadFacing(), details.parameters().parkingCars()));
     }
 
     /**
@@ -78,6 +97,42 @@ class GeometryEngine {
     List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
             Recommendation recommendation, Map<String, String> versions,
             PlanningParameterSet parameterSet, BuildableEnvelope envelope) {
+        return generate(projectId, version, details, recommendation, versions, parameterSet,
+                envelope, null, null);
+    }
+
+    /**
+     * The same, identified well enough to ask AVAS AI where the rooms should go.
+     *
+     * <p>The tenant and the requirement snapshot are what make the remote call answerable: the
+     * service checks them back against the reply, so a layout planned for one snapshot can never be
+     * adopted into another. Callers without them — every test that drives the engine directly — get
+     * the local planner, which is the same programme arranged the platform's own way.</p>
+     */
+    List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
+            Recommendation recommendation, Map<String, String> versions,
+            PlanningParameterSet parameterSet, BuildableEnvelope envelope, String tenantId,
+            String contextVersion) {
+        return generate(projectId, version, details, recommendation, versions, parameterSet,
+                envelope, tenantId, contextVersion, null, true);
+    }
+
+    /**
+     * The same, for one strategy and with the remote planner under the caller's control.
+     *
+     * <p>Both parameters exist for the same reason: arranging a concept with AVAS AI is worth doing
+     * for the concept somebody opened, and not for the two they did not. Generating all three
+     * eagerly spent three calls and a minute and a half of the customer's wait to produce two plans
+     * nobody looked at — and, until the arrangement schema landed, usually threw all three away.</p>
+     *
+     * <p>{@code onlyStrategy} keeps the loop index, so the candidate it returns carries the same
+     * deterministic id as the one it replaces. Estimates, renders and audit entries already keyed to
+     * that drawing stay pointed at it.</p>
+     */
+    List<DrawingCandidate> generate(String projectId, int version, BasicDetailsRequest details,
+            Recommendation recommendation, Map<String, String> versions,
+            PlanningParameterSet parameterSet, BuildableEnvelope envelope, String tenantId,
+            String contextVersion, String onlyStrategy, boolean remoteLayout) {
         if (details.plotWidth() < 10 || details.plotLength() < 10) {
             throw new IllegalArgumentException("Plot dimensions must each be at least 10 feet");
         }
@@ -88,13 +143,16 @@ class GeometryEngine {
         var candidates = new ArrayList<DrawingCandidate>();
         for (int index = 0; index < STRATEGIES.size(); index++) {
             var strategy = STRATEGIES.get(index);
+            if (onlyStrategy != null && !onlyStrategy.equals(strategy.key())) continue;
             var variant = variantFor(parameterSet, strategy.key());
             var optionParameters = optionParameters(details.parameters(), variant);
             var planner = plannerFor(envelope, details.roadFacing(), details.floors(), strategy,
                     recommendation, optionParameters, variant);
             // Extension rooms join before the openings are placed, so the door tree reaches them
             // through the walls they genuinely share rather than through an afterthought.
-            var rooms = extensionRooms(envelope, planner.planBuilding(), details.floors());
+            var arrangement = arrange(planner, remoteLayout ? tenantId : null, projectId,
+                    contextVersion, details, envelope, optionParameters);
+            var rooms = extensionRooms(envelope, arrangement.rooms(), details.floors());
             // A slanted boundary is the one edge rectangles cannot reach, so the rooms standing
             // against it take the boundary's own line. Square plots are already flush against it.
             // The line followed is the buildable outline, so this recovers the wedge inside the
@@ -132,10 +190,14 @@ class GeometryEngine {
                     details.floors());
             var reviewRequired = details.plotWidth() < 20 || !violations.isEmpty();
             var provenance = new LinkedHashMap<>(versions);
-            provenance.put("generator", "AVAS deterministic layout engine");
-            provenance.put("generationMode", "DETERMINISTIC");
-            provenance.put("generationModel", "No generative AI model");
-            provenance.put("modelVersion", "not-applicable");
+            // Said truthfully rather than by habit. These five values are frozen onto the artifact
+            // and printed in the PDF the customer signs, and they used to be constants asserting
+            // that no model was involved — which was true of every drawing the platform had ever
+            // made, and false the moment one of them was arranged by one.
+            provenance.put("generator", arrangement.generator());
+            provenance.put("generationMode", arrangement.mode());
+            provenance.put("generationModel", arrangement.model());
+            provenance.put("modelVersion", arrangement.modelVersion());
             provenance.put("promptVersion", "not-used");
             provenance.put("strategyId", strategy.key());
             provenance.put("geometrySchemaVersion", GEOMETRY_SCHEMA_VERSION);
@@ -322,6 +384,14 @@ class GeometryEngine {
     /** Depth a car needs to stand clear of the building, in feet. */
     /** Below this a strip of open ground is a margin, not somewhere a family would put anything. */
     private static final double USABLE_OPEN_DEPTH = 6d;
+    /**
+     * Shortest side of open ground still worth planting, in feet.
+     *
+     * <p>Well under {@link #USABLE_OPEN_DEPTH}: a three foot side margin is not a garden and is
+     * exactly what gets planted on a plot with a setback ring. Drawing it as bare slab because it
+     * was too narrow to sit in is what made every site plan read as a building on a car park.</p>
+     */
+    private static final double PLANTABLE_OPEN_DEPTH = 3d;
 
     /**
      * Plans the open ground: where the cars stand, and what the rest of the plot becomes.
@@ -354,7 +424,6 @@ class GeometryEngine {
         // approach and the bays the building did not have to carry are one answer, not two.
         var approachParking = ApproachParking.decide(envelope, facing, parameters);
         var bayRectangle = approachParking.bayRectangle(envelope, facing);
-        var approach = approachParking.area();
         var approachParked = bayRectangle != null;
         if (bayRectangle != null) {
             elements.add(SiteElement.of("site-parking", "OUTDOOR_PARKING",
@@ -369,16 +438,32 @@ class GeometryEngine {
             // Excluding it either way meant that on an ordinary plot — where the front setback is
             // the one band deep enough to plant and too shallow to park in — "setbacks with garden"
             // drew no garden at all, and was indistinguishable from plain standard setbacks.
-            var parkedOn = approachParked ? approach : null;
-            open.stream()
-                    .filter(piece -> piece != parkedOn)
-                    .filter(piece -> Math.min(piece.width(), piece.length()) >= USABLE_OPEN_DEPTH)
-                    .max(Comparator.comparingDouble(PlotGeometry.Rect::area))
-                    .ifPresent(piece -> elements.add(SiteElement.of("site-garden", "GARDEN", "Garden",
-                            piece.x(), piece.y(), piece.width(), piece.length())));
+            //
+            // Measured with the bays already standing on the ground, so what is left is the lawn
+            // beside the driveway rather than a rectangle covering both. The band used to be
+            // withheld from the garden by an identity test against a rectangle from a separate
+            // residualRectangles call, which could never match: the lawn was drawn over the bays,
+            // and because the garden is painted after them, over the parked cars.
+            var plantable = approachParked ? openGround(envelope, bayRectangle) : open;
+            // Every piece, not only the largest. The boundary strips a setback ring leaves are what
+            // a plot this size is actually planted along, and naming one of them the garden while
+            // drawing the rest as bare slab is not what the plan does with that ground.
+            var planted = plantable.stream()
+                    .filter(piece -> Math.min(piece.width(), piece.length()) >= PLANTABLE_OPEN_DEPTH)
+                    .sorted(Comparator.comparingDouble(PlotGeometry.Rect::area).reversed())
+                    .toList();
+            for (var index = 0; index < planted.size(); index++) {
+                var piece = planted.get(index);
+                elements.add(SiteElement.of("site-garden-" + index, "GARDEN",
+                        // Only ground deep enough to be used as a garden is called one; the rest is
+                        // planted and left unlabelled rather than promising a lawn nobody can sit on.
+                        Math.min(piece.width(), piece.length()) >= USABLE_OPEN_DEPTH ? "Garden" : null,
+                        piece.x(), piece.y(), piece.width(), piece.length()));
+            }
         }
         return List.copyOf(elements);
     }
+
 
     /**
      * The ground on this plot no room is standing on.
@@ -389,8 +474,9 @@ class GeometryEngine {
      * plot, the band beside it still read as empty and a lawn was drawn straight over the rooms
      * standing in it.</p>
      */
-    private List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope) {
-        return ApproachParking.openGround(envelope);
+    private List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope,
+            PlotGeometry.Rect... alsoOccupied) {
+        return ApproachParking.openGround(envelope, alsoOccupied);
     }
 
 
@@ -998,6 +1084,58 @@ class GeometryEngine {
                 strategy.rowSplit(), recommendation, parameters, variant);
     }
 
+    /**
+     * The storeys of one option, arranged remotely where that is configured and locally otherwise.
+     *
+     * <p>Both paths plan the same programme — {@link FloorPlanner#roomProgramme()} is what travels
+     * to the service — so the question the two answer is only how the rooms are arranged, never
+     * which rooms the customer gets. That separation is what makes the fallback safe: a plan that
+     * comes back locally is the same home, and nothing downstream has to know which planner drew
+     * it.</p>
+     *
+     * <p>Called once per strategy, so a deployment with the remote route enabled makes one call per
+     * option rather than one per project. The strategies differ in their parameter variant, so the
+     * programmes differ and the three options stay three options.</p>
+     */
+    private Arrangement arrange(FloorPlanner planner, String tenantId, String projectId,
+            String contextVersion, BasicDetailsRequest details, BuildableEnvelope envelope,
+            HomeParameters parameters) {
+        if (layoutClient == null || tenantId == null || contextVersion == null) {
+            return Arrangement.local(planner);
+        }
+        var stairRequired = details.floors() > 1;
+        var liftRequired = stairRequired && !"NONE".equals(parameters.liftProvision());
+        var indoorBays = ApproachParking.decide(envelope, details.roadFacing(), parameters)
+                .indoorBays(parameters);
+        return layoutClient.plan(tenantId, projectId, contextVersion, details, envelope, parameters,
+                        planner.roomProgramme(), stairRequired, liftRequired, indoorBays)
+                .map(Arrangement::remote)
+                .orElseGet(() -> Arrangement.local(planner));
+    }
+
+    /**
+     * One storey set and an honest account of what drew it.
+     *
+     * <p>The two are kept together deliberately. Rooms and provenance travelling separately is
+     * exactly how a drawing ends up carrying the wrong story about its own origin.</p>
+     */
+    private record Arrangement(List<RoomGeometry> rooms, String generator, String mode,
+                               String model, String modelVersion) {
+        static Arrangement local(FloorPlanner planner) {
+            return new Arrangement(planner.planBuilding(), "AVAS deterministic layout engine",
+                    "DETERMINISTIC", "No generative AI model", "not-applicable");
+        }
+
+        static Arrangement remote(LayoutClient.Layout layout) {
+            // The AI service answering from its own rules is still not a model, and saying so is
+            // the difference between provenance and branding.
+            var model = layout.modelDrawn() ? layout.model() : "No generative AI model";
+            return new Arrangement(layout.rooms(), "AVAS AI hub layout planner",
+                    layout.modelDrawn() ? "AI_ASSISTED" : "DETERMINISTIC", model,
+                    layout.modelDrawn() ? layout.model() : "not-applicable");
+        }
+    }
+
     /** Floor area an extension room aims for, matched to the ordinary rooms beside it. */
     private static final double EXTENSION_ROOM_AREA = 150d;
     /** Shortest side an extension room may be drawn at, in feet. */
@@ -1474,9 +1612,14 @@ class GeometryEngine {
      * How willing a plan should be to reach {@code to} by cutting a door out of {@code from}.
      *
      * <p>Lower is better. The ordering encodes the circulation rules a drawing is read against: a
-     * private bathroom opens off the bedroom it serves, habitable rooms open off the passage, and
-     * nothing is entered through a bedroom or a parking bay if any other wall will do.</p>
+     * private bathroom opens off the bedroom it serves, habitable rooms open off the hub the plan
+     * circulates through, and nothing is entered through a bedroom or a parking bay if any other
+     * wall will do.</p>
      */
+    /** The rooms a plan circulates through, which is where every other room wants its door. */
+    private static final java.util.Set<String> HUB_ROOMS = java.util.Set.of(
+            "LIVING_ROOM", "DINING", "FAMILY_LOUNGE", "MULTIPURPOSE_ROOM", "FOYER");
+
     /** The rooms that legitimately open off a bedroom, because they belong to it. */
     private static final java.util.Set<String> BEDROOM_SUITE =
             java.util.Set.of("ATTACHED_BATHROOM", "DRESSING_ROOM", "STORE", "BALCONY", "TERRACE");
@@ -1499,8 +1642,11 @@ class GeometryEngine {
             return BEDROOM_SUITE.contains(toType) ? 35 : 400;
         }
         if (RoomSpec.isOutdoor(fromType)) return 25;
-        if ("LIVING_ROOM".equals(fromType) || "DINING".equals(fromType)
-                || "FAMILY_LOUNGE".equals(fromType)) return 10;
+        // The hub. These are the rooms a plan without a corridor circulates through, so a door cut
+        // out of one of them is the door the drawing wants; anything else is a room being crossed
+        // to reach another room. Without the shared room and the hall in this set an upper storey
+        // planned around its landing was scored level with one entered through the study.
+        if (HUB_ROOMS.contains(fromType)) return 10;
         return 20;
     }
 
@@ -1567,6 +1713,7 @@ class GeometryEngine {
         if (room.type().contains("LIVING")) return 0;
         if (room.type().contains("PARKING") || "PORCH".equals(room.type())) return 1;
         if (room.type().contains("LOUNGE") || room.type().contains("DINING")) return 2;
+        // Only ever present on geometry drawn before circulation became habitable.
         if (RoomSpec.CORRIDOR.equals(room.type())) return 3;
         if (room.type().contains("KITCHEN")) return 4;
         if (room.type().contains("BEDROOM")) return 5;

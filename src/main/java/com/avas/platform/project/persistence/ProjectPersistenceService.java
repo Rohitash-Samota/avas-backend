@@ -1,6 +1,7 @@
 package com.avas.platform.project.persistence;
 
 import com.avas.platform.project.AuditEvent;
+import com.avas.platform.project.ConceptRenderClient;
 import com.avas.platform.project.BasicDetailsRequest;
 import com.avas.platform.project.DrawingCandidate;
 import com.avas.platform.project.Estimate;
@@ -13,6 +14,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -24,13 +26,78 @@ public class ProjectPersistenceService {
     private final EstimateArtifactRepository estimates;
     private final ProjectAuditRecordRepository audit;
     private final ProjectStateRepository states;
+    private final ConceptRenderRepository renders;
     private final ObjectMapper json;
 
     public ProjectPersistenceService(ProjectRecordRepository projects, RequirementSnapshotRepository requirements,
                                      DrawingArtifactRepository drawings, EstimateArtifactRepository estimates,
-                                     ProjectAuditRecordRepository audit, ProjectStateRepository states, ObjectMapper json) {
+                                     ProjectAuditRecordRepository audit, ProjectStateRepository states,
+                                     ConceptRenderRepository renders, ObjectMapper json) {
         this.projects = projects; this.requirements = requirements; this.drawings = drawings;
-        this.estimates = estimates; this.audit = audit; this.states = states; this.json = json;
+        this.estimates = estimates; this.audit = audit; this.states = states;
+        this.renders = renders; this.json = json;
+    }
+
+    /**
+     * The picture already drawn for this concept, if there is one.
+     *
+     * <p>Read before the image model is asked, not after, because asking is the expensive and
+     * irreversible half: a second call bills again and returns a different house, so a stored answer
+     * is not an optimisation here but the only thing that makes the illustration stable.</p>
+     */
+    @Transactional(readOnly = true)
+    public Optional<ConceptRenderClient.Render> findRender(String drawingId, String style, String brief) {
+        return renders.findByDrawingIdAndStyleAndBriefKey(drawingId, style, briefKey(brief))
+                .map(value -> new ConceptRenderClient.Render(value.image(), value.mediaType(), value.prompt(),
+                        value.provider(), value.model(), false, readWarnings(value.warningsJson())));
+    }
+
+    /**
+     * The last picture generated for a style/storey prefix, whatever brief or presentation options
+     * produced it. Used only when assembling the PDF set: the document should carry what the customer
+     * most recently drew, not silently omit it because they chose a palette or wrote a floor brief.
+     */
+    @Transactional(readOnly = true)
+    public Optional<ConceptRenderClient.Render> findLatestRender(String drawingId, String stylePrefix) {
+        return renders.findFirstByDrawingIdAndStyleStartingWithOrderByCreatedAtDesc(drawingId, stylePrefix)
+                .map(value -> new ConceptRenderClient.Render(value.image(), value.mediaType(), value.prompt(),
+                        value.provider(), value.model(), false, readWarnings(value.warningsJson())));
+    }
+
+    /** Keeps the picture against the concept, so the concept looks the same the next time it is opened. */
+    @Transactional
+    public void saveRender(String drawingId, String style, String brief, ConceptRenderClient.Render value) {
+        if (value == null || value.image().length == 0) return;
+        var key = briefKey(brief);
+        var warnings = json(value.warnings());
+        var record = renders.findByDrawingIdAndStyleAndBriefKey(drawingId, style, key)
+                .orElseGet(() -> new ConceptRenderEntity(drawingId, style, key, value.mediaType(), value.image(),
+                        value.prompt(), value.provider(), value.model(), warnings));
+        record.update(value.mediaType(), value.image(), value.prompt(), value.provider(), value.model(), warnings);
+        renders.save(record);
+    }
+
+    /** Forgets the stored picture so the next view draws a new one. Used by an explicit redraw. */
+    @Transactional
+    public void forgetRender(String drawingId, String style, String brief) {
+        renders.findByDrawingIdAndStyleAndBriefKey(drawingId, style, briefKey(brief)).ifPresent(renders::delete);
+    }
+
+    /**
+     * One value for "no brief", because a unique index cannot compare two nulls.
+     *
+     * <p>Left null, MySQL treats every brief-less render as distinct from every other, the lookup
+     * never matches, and the store silently degenerates into a log of pictures nobody is shown.</p>
+     */
+    private String briefKey(String brief) {
+        var trimmed = brief == null ? "" : brief.trim();
+        return trimmed.length() <= 400 ? trimmed : trimmed.substring(0, 400);
+    }
+
+    private List<String> readWarnings(String value) {
+        if (value == null || value.isBlank()) return List.of();
+        try { return json.readValue(value, json.getTypeFactory().constructCollectionType(List.class, String.class)); }
+        catch (JsonProcessingException exception) { return List.of(); }
     }
 
     @Transactional
@@ -109,6 +176,9 @@ public class ProjectPersistenceService {
         var legacyId = "demo-project";
         if (!projects.existsByPublicId(legacyId) && !states.existsByProjectId(legacyId)) return;
         estimates.deleteAllByProjectId(legacyId);
+        var drawingIds = drawings.findAll().stream()
+                .filter(value -> legacyId.equals(value.projectId())).map(DrawingArtifactEntity::drawingId).toList();
+        if (!drawingIds.isEmpty()) renders.deleteAllByDrawingIdIn(drawingIds);
         drawings.deleteAllByProjectId(legacyId);
         requirements.deleteAllByProjectId(legacyId);
         audit.deleteAllByProjectId(legacyId);

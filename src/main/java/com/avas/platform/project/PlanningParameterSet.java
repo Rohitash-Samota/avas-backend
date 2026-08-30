@@ -64,7 +64,7 @@ public record PlanningParameterSet(
                     value.parkingCars(), value.solarReady(), value.rainwaterHarvesting(),
                     deterministicRoomTargets(details, envelope, index),
                     weights,
-                    List.of(programmeExplanation(details),
+                    List.of(programmeExplanation(details, envelope),
                             circulationExplanation(details),
                             "Room areas are concept targets; local rules and professional design remain authoritative.")));
         }
@@ -123,7 +123,7 @@ public record PlanningParameterSet(
             }
         }
 
-        var bedrooms = bedroomRequirement(details);
+        var bedrooms = bedroomRequirement(details, envelope);
         var bedroomFloors = bedroomFloors(floors, bedrooms);
         for (var index = 0; index < bedrooms; index++) {
             var floor = bedroomFloors.get(index);
@@ -276,12 +276,17 @@ public record PlanningParameterSet(
         return Math.round(value * 10d) / 10d;
     }
 
-    private static int bedroomRequirement(BasicDetailsRequest details) {
-        // Deliberately the household's own rule rather than a second copy of it. This counted every
-        // child as a bedroom of their own while the recommendation had them sharing, so the targets
-        // asked the planner for rooms the brief had never promised and every layout came back with a
-        // programme gap against a bedroom count nobody had chosen.
-        return details.family().bedroomsNeeded();
+    /**
+     * Bedrooms these targets are built around, decided once by {@link HouseholdProgramme}.
+     *
+     * <p>This held a copy of the household's headcount rule, kept identical to the recommendation's
+     * so the two could not disagree — and so they agreed on a count neither could justify, because
+     * neither could see the plot. The decision belongs to the programme now, and both read it.
+     * Targets that named four bedrooms against a recommendation of two were audited as a programme
+     * gap on every candidate drawn.</p>
+     */
+    private static int bedroomRequirement(BasicDetailsRequest details, BuildableEnvelope envelope) {
+        return HouseholdProgramme.deterministic(details, envelope, null).bedrooms();
     }
 
     private static List<String> bedroomFloors(List<String> floors, int bedrooms) {
@@ -301,9 +306,10 @@ public record PlanningParameterSet(
         };
     }
 
-    private static String programmeExplanation(BasicDetailsRequest details) {
+    private static String programmeExplanation(BasicDetailsRequest details,
+            BuildableEnvelope envelope) {
         var guests = details.family().regularGuests() ? " plus a preferred flex/guest room" : "";
-        return bedroomRequirement(details) + " core bedrooms are recommended for "
+        return bedroomRequirement(details, envelope) + " core bedrooms are recommended for "
                 + details.family().members() + " permanent residents" + guests + ".";
     }
 

@@ -40,6 +40,14 @@ public record BuildableEnvelope(
     private static final double MINIMUM_STRIP_SIDE = 3d;
     /** Floor area below which leftover ground is margin rather than something to plan. */
     private static final double MINIMUM_STRIP_AREA = 12d;
+    /**
+     * Most of its own depth the building will give up so the cars can stand in front of it.
+     *
+     * <p>A foot off a forty-seven foot plate to save a three-hundred square foot garage is a clear
+     * gain. A third of the plate to save the same garage is not, however the arithmetic on one
+     * storey looks, because the depth is lost on every storey and the garage was only ever on one.</p>
+     */
+    private static final double MAXIMUM_PARKING_HOLD_BACK_SHARE = 0.15d;
 
     public BuildableEnvelope {
         buildableOutline = buildableOutline == null ? List.of() : List.copyOf(buildableOutline);
@@ -53,6 +61,17 @@ public record BuildableEnvelope(
      * @throws IllegalArgumentException when setbacks leave no rectangle a home could occupy
      */
     public static BuildableEnvelope derive(PlotBoundary plot, SetbackRule setbacks, int floors) {
+        return derive(plot, setbacks, floors, null, 0);
+    }
+
+    /**
+     * Derives the buildable footprint, holding the building back far enough to park outdoors.
+     *
+     * @param facing     the road this plot is entered from, or {@code null} when it is not yet known
+     * @param parkingCars bays the home is planned around; zero leaves the footprint untouched
+     */
+    public static BuildableEnvelope derive(PlotBoundary plot, SetbackRule setbacks, int floors,
+            Facing facing, int parkingCars) {
         var notes = new ArrayList<String>();
         var plotArea = plot.area();
         var outline = PlotGeometry.insetBySetbacks(plot, setbacks);
@@ -80,6 +99,8 @@ public record BuildableEnvelope(
                     "No rectangle of at least 8 ft per side fits inside the setback envelope; this plot needs "
                             + "an expert review rather than automatic generation");
         }
+
+        footprint = holdBackForParking(footprint, plot, setbacks, facing, parkingCars, notes);
 
         // One rectangle is what the packer can plan, not what the customer is entitled to build. On
         // an irregular plot the largest one inside the envelope reaches barely two thirds of it, so
@@ -162,6 +183,84 @@ public record BuildableEnvelope(
 
     public double footprintArea() {
         return footprintWidth * footprintLength;
+    }
+
+
+    /**
+     * Pulls the building back from the road until the cars can stand in front of it.
+     *
+     * <p>The footprint is otherwise flush with the setback line, so the only open ground a car could
+     * reach is the front setback itself — and the assumed front setback on a plot this size is seven
+     * and a half feet, which is a foot short of the width of a car. Being a foot short is not a
+     * neutral outcome: {@link ApproachParking} finds no approach, the bays fall to the building, and
+     * the ground floor spends seventeen feet of its frontage on a garage. That is three hundred and
+     * forty square feet of structure, and the room it displaces is the living room.</p>
+     *
+     * <p>So the building gives up the foot. What it buys back is the whole garage, and what the
+     * drawing gains is a house with cars parked in front of it rather than inside it.</p>
+     *
+     * <p>Deliberately not done by deepening the setback. A setback is what the authority requires
+     * and is recorded as an assumption pending verification; how far behind that line the building
+     * chooses to sit is a design decision, and conflating the two would put a design choice in the
+     * field a professional is asked to check.</p>
+     */
+    private static PlotGeometry.Rect holdBackForParking(PlotGeometry.Rect footprint, PlotBoundary plot,
+            SetbackRule setbacks, Facing facing, int parkingCars, List<String> notes) {
+        // Full plot usage is an instruction to build across the outline; there is no ground to give.
+        if (facing == null || parkingCars <= 0 || setbacks.waived()) return footprint;
+        var box = plot.bounds();
+        var horizontal = facing == Facing.NORTH || facing == Facing.SOUTH;
+        var depth = switch (facing) {
+            case NORTH -> box.maximumY() - (footprint.y() + footprint.length());
+            case SOUTH -> footprint.y() - box.minimumY();
+            case EAST -> box.maximumX() - (footprint.x() + footprint.width());
+            case WEST -> footprint.x() - box.minimumX();
+        };
+        var run = horizontal ? footprint.width() : footprint.length();
+
+        // Standing along the boundary needs the width of a car and the length of one per bay;
+        // driving in nose first needs the length of a car and only its width per bay. Whichever
+        // costs the building less depth is the one to hold back for, because both are arrangements
+        // this market builds and the cheaper one leaves more house.
+        var alongside = fits(run, parkingCars * ApproachParking.CAR_LENGTH)
+                ? ApproachParking.CAR_WIDTH : Double.NaN;
+        var noseIn = fits(run, parkingCars * ApproachParking.CAR_WIDTH)
+                ? ApproachParking.CAR_LENGTH : Double.NaN;
+        var required = Double.isNaN(alongside) ? noseIn
+                : Double.isNaN(noseIn) ? alongside : Math.min(alongside, noseIn);
+        if (Double.isNaN(required) || depth + .01 >= required) return footprint;
+
+        var holdBack = required - depth;
+        var plateDepth = horizontal ? footprint.length() : footprint.width();
+        var remaining = plateDepth - holdBack;
+        // Never at the cost of a plate too narrow to plan against. A plot that cannot both hold a
+        // home and park in front of it keeps the home, and the bays fall back to the building.
+        if (remaining < SetbackRule.minimumCore()) return footprint;
+        // And never when the ground given up costs more than the garage it saves. On a small plot a
+        // shallow front setback is eleven feet short of a nose-in bay, and paying eleven feet of a
+        // thirty-two foot plate to avoid one indoor bay is a worse home, not a better one: it is a
+        // third of every storey spent to save a room on one of them.
+        if (holdBack * run > parkingCars * RoomSpec.of("PARKING").preferredArea()) return footprint;
+        if (holdBack > plateDepth * MAXIMUM_PARKING_HOLD_BACK_SHARE) return footprint;
+
+        notes.add("The building is set back a further " + round(holdBack)
+                + " ft from the road so " + parkingCars + " car" + (parkingCars == 1 ? "" : "s")
+                + " can stand on the approach rather than inside the ground floor");
+        return switch (facing) {
+            case NORTH -> new PlotGeometry.Rect(footprint.x(), footprint.y(),
+                    footprint.width(), footprint.length() - holdBack);
+            case SOUTH -> new PlotGeometry.Rect(footprint.x(), footprint.y() + holdBack,
+                    footprint.width(), footprint.length() - holdBack);
+            case EAST -> new PlotGeometry.Rect(footprint.x(), footprint.y(),
+                    footprint.width() - holdBack, footprint.length());
+            case WEST -> new PlotGeometry.Rect(footprint.x() + holdBack, footprint.y(),
+                    footprint.width() - holdBack, footprint.length());
+        };
+    }
+
+    /** True when a run of open ground is long enough to stand the bays it has to hold. */
+    private static boolean fits(double run, double needed) {
+        return run + .01 >= needed;
     }
 
     /**

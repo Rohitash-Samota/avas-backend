@@ -21,6 +21,13 @@ import java.util.Map;
  * stair and lift occupy at the rear of one of them. Everything else is planned per floor, so each
  * storey is genuine floor-specific geometry.</p>
  *
+ * <p>The spine is a <em>hub</em>, not a corridor. It is drawn at habitable width and filled with the
+ * rooms a household actually walks through — the dining run downstairs, the family lounge above —
+ * so every other room takes its door off floor the family uses rather than off a passage that exists
+ * only to be walked down. A three-and-three-quarter-foot corridor running the depth of the building
+ * spends about forty square feet a storey on nothing else, and no room here is ever labelled
+ * {@code CORRIDOR}: circulation is habitable or it is not drawn.</p>
+ *
  * <p>Within a strip every room is a run along the spine, sized from the area its type wants and
  * clamped to the dimensions that type is usable at. Surplus area goes to spaces that can absorb it
  * before it is allowed to inflate a bedroom; a plate too small to hold the programme drops optional
@@ -32,8 +39,30 @@ import java.util.Map;
  * a space at a size that is known to be unusable.</p>
  */
 final class FloorPlanner {
-    /** Clear width of the circulation spine. Below about three feet two people cannot pass. */
-    private static final double CORRIDOR_WIDTH = 3.75d;
+    /**
+     * Widest the habitable circulation run is drawn, and the share of the plate it starts from.
+     *
+     * <p>Past about fourteen feet the run stops being a room the household passes through and
+     * becomes a hall, which is the double-loaded corridor again with a sofa in it.</p>
+     */
+    private static final double HUB_MAX_WIDTH = 14d;
+    private static final double HUB_SHARE = .26d;
+    /**
+     * The spaces the hub run may be made of: circulation the household lives in.
+     *
+     * <p>Every one of them is a room somebody walks through on the way to somewhere else anyway, so
+     * putting the plan's through-route in them costs the family no floor. A store or a study in this
+     * band would be a room with the household's traffic running across it, which is the one thing
+     * the hub must not become.</p>
+     */
+    private static final List<String> HUB_ROOMS =
+            List.of("DINING", "FAMILY_LOUNGE", "MULTIPURPOSE_ROOM", "FOYER");
+    /** What a ground-floor hub with run to spare takes on, most useful first. */
+    private static final List<String> GROUND_HUB_FILLERS =
+            List.of("FAMILY_LOUNGE", "FOYER", "MULTIPURPOSE_ROOM");
+    /** The same upstairs, where the shared room is the one the landing is spent on. */
+    private static final List<String> UPPER_HUB_FILLERS =
+            List.of("MULTIPURPOSE_ROOM", "FAMILY_LOUNGE");
     /** Narrowest strip worth planning rooms in; under this the plate is planned as a single run. */
     private static final double MINIMUM_STRIP = 8.5d;
     /**
@@ -47,6 +76,14 @@ final class FloorPlanner {
     private static final double MAXIMUM_FRONT_SHARE = 0.42d;
     /** Depth a car needs to stand clear, plus the wall it stands against. */
     private static final double PARKING_DEPTH = 16.5d;
+    /**
+     * Lowest {@link RoomSpec} priority band that is surplus rather than programme.
+     *
+     * <p>Priority 1 is structural and 5 is dropped first; from 4 upward a space is something the
+     * finish tier buys with area the brief has not claimed, so it can give way to a room the brief
+     * did claim.</p>
+     */
+    private static final int OPTIONAL_PRIORITY = 4;
 
     private final Facing facing;
     private final int floorCount;
@@ -102,10 +139,18 @@ final class FloorPlanner {
     /** Length of the run rooms are laid along, and the width the strips divide between them. */
     private final double runLength;
     private final double bandTotal;
-    private final double corridorWidth;
+    /**
+     * Width of the habitable circulation run, or zero on a plate too narrow to carry one.
+     *
+     * <p>Zero is not a corridor by another name: it means this storey is planned as one run with no
+     * separate circulation band at all, and the hub's rooms take their place in that run.</p>
+     */
+    private final double hubWidth;
+    /** True when the plate is wide enough for the hub to be its own band between the strips. */
+    private final boolean hubBand;
     private final double leftWidth;
     private final double rightWidth;
-    private final double corridorFrom;
+    private final double hubFrom;
     private final double coreRun;
     private final boolean coreOnLeft;
     private final double stairAcross;
@@ -166,25 +211,38 @@ final class FloorPlanner {
         this.spineAlongFrontage = across > depth * 1.25d;
         this.runLength = spineAlongFrontage ? across : depth;
         this.bandTotal = spineAlongFrontage ? depth : across;
-        this.corridorWidth = round2(clamp(bandTotal * .18d, RoomSpec.of(RoomSpec.CORRIDOR).minShortSide(),
-                CORRIDOR_WIDTH));
+        // The hub is a room, so it is sized like one. Below the width the lounge and the dining run
+        // are usable at there is no habitable circulation to be had, and the honest answer is a
+        // storey planned as a single run rather than a passage smuggled back in under another name.
+        var wantedHub = clamp(bandTotal * HUB_SHARE, hubMinimumWidth(), HUB_MAX_WIDTH);
+        var affordableHub = bandTotal - MINIMUM_STRIP * .6d;
+        this.hubBand = affordableHub + .01 >= hubMinimumWidth();
+        this.hubWidth = hubBand ? round2(Math.min(wantedHub, affordableHub)) : 0d;
+        if (!hubBand) {
+            notes.add("The buildable width cannot carry a habitable circulation run beside a row of "
+                    + "rooms, so this storey is planned as a single run of rooms opening into one "
+                    + "another and needs professional review");
+        }
 
-        var usableBand = bandTotal - corridorWidth;
+        var usableBand = bandTotal - hubWidth;
         this.singleRun = usableBand < MINIMUM_STRIP * 2;
         if (singleRun) {
-            // Too narrow for rooms either side of a spine: plan one run with the passage against a
-            // wall. That is what a genuinely narrow plot gets built as.
+            // Too narrow for rooms either side of the hub: plan one run with the hub alongside it.
+            // That is what a genuinely narrow plot gets built as.
             this.leftWidth = round2(Math.max(MINIMUM_STRIP * .6, usableBand));
-            this.corridorFrom = this.leftWidth;
+            this.hubFrom = this.leftWidth;
             this.rightWidth = 0d;
-            notes.add("The buildable width is too narrow for rooms either side of a passage, so the "
-                    + "layout is planned as a single run against one wall and needs professional review");
+            if (hubBand) {
+                notes.add("The buildable width is too narrow for rooms either side of the living "
+                        + "run, so the layout is planned as a single run beside it and needs "
+                        + "professional review");
+            }
         } else {
             var left = clamp(usableBand * clamp(stripSplit, .38d, .62d),
                     MINIMUM_STRIP, usableBand - MINIMUM_STRIP);
             this.leftWidth = round2(left);
-            this.corridorFrom = this.leftWidth;
-            this.rightWidth = round2(bandTotal - this.leftWidth - corridorWidth);
+            this.hubFrom = this.leftWidth;
+            this.rightWidth = round2(bandTotal - this.leftWidth - hubWidth);
         }
 
         // The core goes in the service strip when that strip can carry a stair, so the sleeping strip
@@ -209,6 +267,19 @@ final class FloorPlanner {
             notes.add("The buildable width cannot carry a lift shaft beside the stair; the lift "
                     + "provision needs a professional to reposition the core");
         }
+    }
+
+    /**
+     * Narrowest the hub may be drawn and still be the rooms it is made of.
+     *
+     * <p>Taken from {@link #HUB_ROOMS} rather than fixed, because the hub is not a passage with a
+     * minimum clear width — it is a dining run or a family lounge, and a lounge nine feet across is
+     * not a lounge. A plate that cannot give this much has no habitable circulation to plan.</p>
+     */
+    private static double hubMinimumWidth() {
+        var minimum = 0d;
+        for (var type : HUB_ROOMS) minimum = Math.max(minimum, RoomSpec.of(type).minShortSide());
+        return minimum;
     }
 
     /**
@@ -327,8 +398,8 @@ final class FloorPlanner {
      * <p>Ground floor only. An upper storey's band carries a terrace and balconies whose widths were
      * never counted here either, and changing that is a separate question from this one.</p>
      */
-    private double leadShareOfBand(int floorIndex, double outdoorArea) {
-        var lead = RoomSpec.of(floorIndex == 0 ? "LIVING_ROOM" : "FAMILY_LOUNGE");
+    private double leadShareOfBand(int floorIndex, String leadType, double outdoorArea) {
+        var lead = RoomSpec.of(leadType);
         if (floorIndex != 0) return bandTotal;
         var share = bandTotal;
         if (outdoorArea > 1) {
@@ -340,13 +411,32 @@ final class FloorPlanner {
     }
 
     /**
+     * The space whose own size sets how deep the public band on the road runs.
+     *
+     * <p>Downstairs it is always the living room, which is what the frontage is for. Upstairs the
+     * shared room has moved onto the hub run, so the band is whatever the storey puts on the road —
+     * a terrace, a balcony — and the largest of those sets the depth. Reading the lead from the band
+     * itself is what keeps the two from disagreeing: sizing the band around a room that is no longer
+     * in it would reserve depth nothing fills.</p>
+     */
+    private String leadType(List<Request> front, int floorIndex) {
+        if (floorIndex == 0) return "LIVING_ROOM";
+        var lead = front.getFirst();
+        for (var request : front) {
+            if (request.preferredArea() > lead.preferredArea()) lead = request;
+        }
+        return lead.type();
+    }
+
+    /**
      * Depth of the public band on the road, for one storey.
      *
      * <p>Free to differ floor to floor: the stair sits a fixed run in from the rear wall, so it
      * stacks whatever the front of each storey does.</p>
      */
-    private double frontDepth(int floorIndex, double outdoorArea, int bedroomCount) {
-        var leadType = floorIndex == 0 ? "LIVING_ROOM" : "FAMILY_LOUNGE";
+    private double frontDepth(int floorIndex, List<Request> front, double outdoorArea,
+            int bedroomCount) {
+        var leadType = leadType(front, floorIndex);
         var living = RoomSpec.of(leadType);
         // The band's depth follows the space that leads it, so the programme has to be read here
         // too: sizing the public band from the type catalogue while the rooms inside it were sized
@@ -358,7 +448,7 @@ final class FloorPlanner {
         // spreading the total across the full band made the band's depth a function of the bays and
         // left the living room's own target barely able to move it. The lead room now sets the
         // depth of the band it leads.
-        var wanted = wantedArea(floorIndex, leadType) / leadShareOfBand(floorIndex, outdoorArea);
+        var wanted = wantedArea(floorIndex, leadType) / leadShareOfBand(floorIndex, leadType, outdoorArea);
         var minimum = living.minShortSide();
         if (floorIndex == 0 && indoorParkingBays > 0 && outdoorArea > 0) {
             minimum = Math.max(minimum, PARKING_DEPTH);
@@ -373,6 +463,11 @@ final class FloorPlanner {
         var spineFloor = coreRun + Math.max(RoomSpec.of("BEDROOM").minShortSide(), sleepingRun);
         var ceiling = Math.min(Math.min(runLength * MAXIMUM_FRONT_SHARE, floorIndex == 0 ? 21d : 14d),
                 Math.max(runLength * .25, runLength - spineFloor));
+        // And never deeper than the band's own programme can absorb. The band tiles the frontage
+        // exactly, so depth it is given and the rooms cannot use is depth one of them is stretched
+        // over: an upper storey whose band holds only a terrace and a balcony drew the balcony a
+        // hundred and thirty-eight square feet, which is a room, not a balcony.
+        ceiling = Math.min(ceiling, absorbableDepth(front));
         // The strategy nudges the public band within the band it is allowed, rather than setting it.
         // Applied after the wanted depth has been brought inside that band rather than before: a
         // programme that asks for more depth than the plate can give saturates at the ceiling, and
@@ -382,6 +477,38 @@ final class FloorPlanner {
         var high = Math.max(ceiling, living.minShortSide() * .6);
         var base = clamp(wanted, low, high);
         return round2(clamp(base * clamp(frontShare * 2.2d, .88d, 1.14d), low, high));
+    }
+
+    /**
+     * True when the spaces on the frontage can fill a band of their own.
+     *
+     * <p>A band tiles the whole frontage, so its depth and its programme have to agree: what the
+     * spaces can absorb has to reach the depth the deepest of them needs. A frontage that fails this
+     * would be drawn as one space stretched the width of the building, which is not a balcony, a
+     * terrace or a band — it is a strip of floor with a label on it.</p>
+     */
+    private boolean fillsABand(List<Request> front) {
+        if (front.isEmpty()) return false;
+        var deepest = 0d;
+        for (var request : front) {
+            deepest = Math.max(deepest, RoomSpec.of(request.type()).minShortSide());
+        }
+        return absorbableDepth(front) + .05 >= deepest;
+    }
+
+    /**
+     * Depth of band the spaces on the frontage could fill without any of them being oversized.
+     *
+     * <p>Each space is allowed the larger of the area its type is usable up to and the area the
+     * programme actually asked it for, because a run of parking bays is sized by the cars standing
+     * in it rather than by the catalogue.</p>
+     */
+    private double absorbableDepth(List<Request> front) {
+        var absorbable = 0d;
+        for (var request : front) {
+            absorbable += Math.max(request.preferredArea(), RoomSpec.of(request.type()).maxArea());
+        }
+        return absorbable / Math.max(.01, bandTotal);
     }
 
     /**
@@ -396,6 +523,7 @@ final class FloorPlanner {
         var ground = floorIndex == 0;
         var topFloor = floorIndex == floorCount - 1;
         var front = new ArrayList<Request>();
+        var hub = new ArrayList<Request>();
         var sleeping = new ArrayList<Request>();
         var service = new ArrayList<Request>();
 
@@ -415,12 +543,14 @@ final class FloorPlanner {
                                 - SpecificationTier.entranceSacrificeOrder().indexOf(space)));
             }
             front.add(want(floorIndex, "LIVING_ROOM"));
-            // Dining leads the sleeping strip so it opens straight off the living room, the way a
-            // living-dining runs in a real plan, and the kitchen faces it across the passage.
-            sleeping.add(want(floorIndex, "DINING"));
-            // A bungalow has no upper floor to put the family room on, so it belongs here.
+            // The dining run is the hub: it starts at the wall the living room hands the plan over
+            // at and runs the depth of the storey, so the kitchen on one side and the bedrooms on
+            // the other take their doors off the room the family eats in rather than off a passage.
+            hub.add(want(floorIndex, "DINING"));
+            // A bungalow has no upper floor to put the family room on, so it belongs here — behind
+            // the dining, still on the run, which is where an open-plan ground floor puts it anyway.
             if (floorCount == 1 && recommendation.familyLounge()) {
-                sleeping.add(want(floorIndex, "FAMILY_LOUNGE"));
+                hub.add(want(floorIndex, "FAMILY_LOUNGE"));
             }
             service.add(want(floorIndex, "KITCHEN"));
             service.add(want(floorIndex, "UTILITY"));
@@ -437,7 +567,9 @@ final class FloorPlanner {
             for (var index = 0; index < balconiesOnFloor(floorIndex); index++) {
                 front.add(want(floorIndex, "BALCONY"));
             }
-            front.add(want(floorIndex,
+            // Upstairs the shared room does the dining's job: it is the landing the bedrooms open
+            // off, so it sits on the run rather than across the frontage.
+            hub.add(want(floorIndex,
                     recommendation.familyLounge() ? "FAMILY_LOUNGE" : "MULTIPURPOSE_ROOM"));
             service.add(want(floorIndex, "BATHROOM"));
             service.add(want(floorIndex, floorIndex == 1 ? "STUDY" : "HOME_OFFICE"));
@@ -464,7 +596,7 @@ final class FloorPlanner {
         }
         if (sleeping.isEmpty()) sleeping.add(want(floorIndex, "FLEX_ROOM"));
         addProgrammeRooms(floorIndex, front, sleeping, service);
-        return new FloorProgramme(front, sleeping, service);
+        return new FloorProgramme(front, hub, sleeping, service);
     }
 
     /** Most rooms one storey will take from the optimized programme beyond its own core. */
@@ -678,21 +810,30 @@ final class FloorPlanner {
         floorProgrammeTypes.clear();
         floorPlacedTypes.clear();
         for (var request : programme.front()) floorProgrammeTypes.add(request.type());
+        for (var request : programme.hub()) floorProgrammeTypes.add(request.type());
         for (var request : programme.sleeping()) floorProgrammeTypes.add(request.type());
         for (var request : programme.service()) floorProgrammeTypes.add(request.type());
 
-        // The public band only exists when the spine runs away from the road. On a wide shallow
-        // plate the public rooms simply lead the strip that faces the road instead.
-        var frontRun = spineAlongFrontage ? 0d
-                : frontDepth(floorIndex, groundOutdoor(floorIndex), bedroomCount);
+        // The public band only exists when the spine runs away from the road and this storey has
+        // enough on the frontage to fill one. An upper floor whose frontage is a single balcony has
+        // not: the band would be drawn three feet deep across the whole building, and the balcony
+        // stretched the width of it. Such spaces belong at the road end of the sleeping strip
+        // instead, beside the bedroom whose balcony they are, with no band at all.
+        var bandLed = fillsABand(programme.front());
+        var frontRun = spineAlongFrontage || !bandLed ? 0d
+                : frontDepth(floorIndex, programme.front(), groundOutdoor(floorIndex), bedroomCount);
         var spineRun = round2(runLength - frontRun);
         var placed = new ArrayList<Placement>();
 
         if (frontRun > .05) {
             placed.addAll(placePublicBand(programme.front(), frontRun, floorIndex));
         }
-        if (spineRun > .05) {
-            placed.add(new Placement(RoomSpec.CORRIDOR, frontRun, corridorFrom, spineRun, corridorWidth));
+        // The hub. Where the plate cannot carry one as its own band the rooms it is made of fall
+        // back into the single run below, so this storey never loses the dining or the shared room
+        // for want of somewhere to put the walking.
+        if (spineRun > .05 && hubBand) {
+            placed.addAll(placeStrip(programme.hub(), frontRun, spineRun, hubFrom, hubWidth, false,
+                    floorIndex == 0 ? GROUND_HUB_FILLERS : UPPER_HUB_FILLERS));
         }
 
         // The two room strips, each one run of rooms along the spine. The strip at band offset zero
@@ -703,6 +844,15 @@ final class FloorPlanner {
         var rightRequests = new ArrayList<>(sleepingOnLeft ? programme.service() : programme.sleeping());
         if (spineAlongFrontage) {
             leftRequests.addAll(0, programme.front());
+        } else if (!bandLed) {
+            // Nothing led the frontage, so the spaces that wanted it lead the sleeping strip, which
+            // is the run that reaches the road once no band stands in front of it.
+            (sleepingOnLeft ? leftRequests : rightRequests).addAll(0, programme.front());
+        }
+        if (!hubBand) {
+            // No band of its own: the hub's rooms lead the run, so the storey is still entered
+            // through them and they are still the rooms everything behind them opens off.
+            leftRequests.addAll(0, programme.hub());
         }
         if (singleRun) {
             leftRequests.addAll(rightRequests);
@@ -719,7 +869,7 @@ final class FloorPlanner {
         placed.addAll(placeStrip(leftRequests, frontRun, spineRun, 0, leftWidth, coreOnLeft));
         if (!singleRun) {
             placed.addAll(placeStrip(rightRequests, frontRun, spineRun,
-                    round2(corridorFrom + corridorWidth), rightWidth, !coreOnLeft));
+                    round2(hubFrom + hubWidth), rightWidth, !coreOnLeft));
         }
 
         var rooms = new ArrayList<RoomGeometry>();
@@ -773,24 +923,63 @@ final class FloorPlanner {
             }
             var trial = new ArrayList<>(service);
             trial.addAll(moving);
+            // The bedroom outranks whatever optional space is standing in its way. A study, a store
+            // and a flex room are what the tier buys with area the brief has not already claimed; a
+            // bedroom the customer was quoted is not optional. Giving up here instead left the
+            // fitting pass to drop the bedroom — each strip judged on its own, neither able to see
+            // that the other was spending a bedroom's worth of run on rooms nobody had asked for —
+            // and a four-bedroom brief came back a three-bedroom drawing.
+            var evicted = new ArrayList<Request>();
+            while (slotMinimum(trial, serviceWidth, true) > serviceAvailable + .01) {
+                var optional = lowestPriorityOptional(trial);
+                if (optional < 0) break;
+                evicted.add(trial.remove(optional));
+            }
             if (slotMinimum(trial, serviceWidth, true) > serviceAvailable + .01) {
-                // The other strip cannot take it either; leave the decision to the fitting pass,
-                // which drops the least important space and says so.
+                // Even without its optional spaces the other strip cannot take the bedroom; leave
+                // the decision to the fitting pass, which drops the least important space and says so.
                 return;
             }
             for (var index = moving.size() - 1; index >= 0; index--) sleeping.remove(last + index);
-            service.addAll(moving);
+            service.clear();
+            service.addAll(trial);
+            for (var room : evicted) {
+                notes.add(roomLabel(room.type()) + " was left out so a bedroom the brief asks for "
+                        + "could be planned across the passage instead");
+            }
         }
+    }
+
+
+    /**
+     * The optional space in a strip that should give way first, or {@code -1} when none may.
+     *
+     * <p>Only the surplus band is evictable. Circulation, wet rooms, the kitchen and the bedrooms
+     * themselves are the programme; a plan that dropped a bathroom to fit another bedroom would be
+     * trading one promise for another rather than spending area the brief never claimed.</p>
+     */
+    private int lowestPriorityOptional(List<Request> requests) {
+        var victim = -1;
+        var worst = Integer.MIN_VALUE;
+        for (var index = 0; index < requests.size(); index++) {
+            var request = requests.get(index);
+            if (request.dropPriority() < OPTIONAL_PRIORITY) continue;
+            if (RoomSpec.isBedroom(request.type())) continue;
+            if (request.dropPriority() >= worst) {
+                worst = request.dropPriority();
+                victim = index;
+            }
+        }
+        return victim;
     }
 
     /**
      * Divides the public band across the frontage, giving each space a usable share.
      *
-     * <p>The band's main habitable room — the living room, or the lounge upstairs — is positioned to
-     * sit across the head of the passage and widened until it covers it. Everything downstream
-     * depends on that overlap: it is the wall the door between the public band and the circulation
-     * spine is cut into, so without it a family would reach the passage through the parking bay or
-     * the terrace.</p>
+     * <p>The band's main habitable room — the living room downstairs — is positioned to sit across
+     * the head of the hub and widened until it covers it. Everything downstream depends on that
+     * overlap: it is the wall the door between the public band and the hub run is cut into, so
+     * without it a family would reach the dining room through the parking bay or the terrace.</p>
      *
      * <p>The band is filled the same way the room strips are. A wide frontage carrying only the two
      * or three rooms the programme names has to stretch one of them across the surplus, which is how
@@ -825,10 +1014,11 @@ final class FloorPlanner {
     }
 
     /**
-     * The room in the band that has to sit across the head of the passage.
+     * The room in the band that has to sit across the head of the hub.
      *
-     * <p>It is the band's main habitable room — the living room downstairs, the family room above —
-     * because that is the wall the door into the circulation spine is cut through. This used to be
+     * <p>It is the band's main habitable room — the living room downstairs — because that is the
+     * wall the door into the hub run is cut through. Upstairs the shared room is on the run itself,
+     * so the band falls through to the largest space it holds. This used to be
      * "whatever the programme added last", which held only while the band contained nothing else:
      * once a wide frontage started being given a filler to absorb its surplus, the filler was
      * appended after the living room and inherited the anchor with it. A storey then opened onto its
@@ -852,7 +1042,7 @@ final class FloorPlanner {
     }
 
     /**
-     * Orders the public band so its anchor room lands over the passage, widening it if it falls short.
+     * Orders the public band so its anchor room lands over the hub, widening it if it falls short.
      *
      * <p>Only the running order is open, so the band still tiles the frontage exactly however the
      * rooms are arranged.</p>
@@ -861,8 +1051,15 @@ final class FloorPlanner {
             int anchor) {
         var others = new ArrayList<Integer>();
         for (var index = 0; index < requests.size(); index++) if (index != anchor) others.add(index);
-        var corridorEnd = corridorFrom + corridorWidth;
-        var wantedOverlap = Math.min(corridorWidth, 2.6d);
+        if (!hubBand) {
+            // Nothing behind the band for the anchor to reach: it simply leads the frontage.
+            var natural = new ArrayList<Integer>();
+            natural.add(anchor);
+            natural.addAll(others);
+            return natural;
+        }
+        var hubEnd = hubFrom + hubWidth;
+        var wantedOverlap = Math.min(hubWidth, 2.6d);
 
         // Slack is what the neighbours could give up without dropping below their own usable width,
         // so each running order is scored on the overlap it could reach rather than the one it
@@ -875,8 +1072,8 @@ final class FloorPlanner {
         var bestOverlap = -1d;
         var leading = 0d;
         for (var insert = 0; insert <= others.size(); insert++) {
-            var reach = leading <= corridorFrom ? widths[anchor] + slack : widths[anchor];
-            var overlap = Math.min(leading + reach, corridorEnd) - Math.max(leading, corridorFrom);
+            var reach = leading <= hubFrom ? widths[anchor] + slack : widths[anchor];
+            var overlap = Math.min(leading + reach, hubEnd) - Math.max(leading, hubFrom);
             if (overlap > bestOverlap + .01) {
                 bestOverlap = overlap;
                 bestInsert = insert;
@@ -887,13 +1084,13 @@ final class FloorPlanner {
         for (var position = 0; position < bestInsert; position++) {
             anchorStart += widths[others.get(position)];
         }
-        bestOverlap = Math.min(anchorStart + widths[anchor], corridorEnd) - Math.max(anchorStart, corridorFrom);
+        bestOverlap = Math.min(anchorStart + widths[anchor], hubEnd) - Math.max(anchorStart, hubFrom);
 
         if (bestOverlap < wantedOverlap && !others.isEmpty()) {
-            // Reaching back to the near edge of the passage is what the anchor has to be wide enough
-            // for; once it starts inside the passage, width alone can no longer buy the overlap.
-            var needed = anchorStart <= corridorFrom
-                    ? corridorFrom + wantedOverlap - anchorStart : wantedOverlap;
+            // Reaching back to the near edge of the hub is what the anchor has to be wide enough
+            // for; once it starts inside the hub, width alone can no longer buy the overlap.
+            var needed = anchorStart <= hubFrom
+                    ? hubFrom + wantedOverlap - anchorStart : wantedOverlap;
             var growth = Math.max(0, needed - widths[anchor]);
             // The neighbours give the space up widest first, never below their own usable width.
             var donors = new ArrayList<>(others);
@@ -922,6 +1119,18 @@ final class FloorPlanner {
      */
     private List<Placement> placeStrip(List<Request> requests, double runFrom, double runTotal,
             double bandFrom, double stripWidth, boolean withCore) {
+        return placeStrip(requests, runFrom, runTotal, bandFrom, stripWidth, withCore,
+                tier.surplusOrder());
+    }
+
+    /**
+     * The same, for a band whose surplus may only be spent on a named set of spaces.
+     *
+     * <p>The hub is the one such band. Anything dropped into it stands in the household's own
+     * through-route, so it may take on another room the family walks through and nothing else.</p>
+     */
+    private List<Placement> placeStrip(List<Request> requests, double runFrom, double runTotal,
+            double bandFrom, double stripWidth, boolean withCore, List<String> fillers) {
         var placements = new ArrayList<Placement>();
         if (stripWidth <= .05 || runTotal <= .05) return placements;
         var carriesCore = withCore && (stairRequired || liftPlaced);
@@ -939,7 +1148,7 @@ final class FloorPlanner {
             return placements;
         }
 
-        var fitted = fitToRun(requests, stripWidth, available, true);
+        var fitted = fitToRun(requests, stripWidth, available, true, fillers);
         var slots = pairCompactSpaces(fitted, stripWidth);
         recordPlaced(slots);
         var spans = shareSlots(slots, available);
@@ -978,6 +1187,12 @@ final class FloorPlanner {
      */
     private List<Request> fitToRun(List<Request> requests, double across, double available,
             boolean allowFiller) {
+        return fitToRun(requests, across, available, allowFiller, tier.surplusOrder());
+    }
+
+    /** The same, spending any surplus on {@code fillers} rather than on the tier's own list. */
+    private List<Request> fitToRun(List<Request> requests, double across, double available,
+            boolean allowFiller, List<String> fillers) {
         var kept = new ArrayList<Request>();
         for (var request : requests) {
             if (Double.isNaN(request.minimumRunIn(across))) {
@@ -1026,7 +1241,7 @@ final class FloorPlanner {
         // Room to spare: give it to spaces that use it well instead of oversizing what is there.
         // Each addition has to keep the run feasible, or the surplus is traded for a squeezed plan.
         if (allowFiller) {
-            for (var filler : tier.surplusOrder()) {
+            for (var filler : fillers) {
                 if (slotMaximum(kept, across, true) >= available - .01) break;
                 if (kept.stream().anyMatch(request -> request.type().equals(filler))) continue;
                 // Already taken by the other strip of this same storey. Each strip used to spend its
@@ -1558,14 +1773,78 @@ final class FloorPlanner {
         }
     }
 
-    /** The rooms one storey holds, grouped by where they sit relative to the circulation spine. */
-    private record FloorProgramme(List<Request> front, List<Request> sleeping, List<Request> service) {}
+    /**
+     * The rooms one storey holds, grouped by where they sit relative to the circulation spine.
+     *
+     * @param hub the run the household walks through — the dining downstairs, the shared room above
+     */
+    private record FloorProgramme(List<Request> front, List<Request> hub, List<Request> sleeping,
+                                  List<Request> service) {}
+
+    /**
+     * One space this building's programme names, before anything has been placed on the plate.
+     *
+     * @param priority {@code REQUIRED}, {@code PREFERRED} or {@code OPTIONAL} — how readily the
+     *                 space gives way when the plate cannot hold everything, translated out of the
+     *                 planner's own drop ranks so a remote planner does not have to know them.
+     */
+    record ProgrammeRoom(String type, String floor, double targetArea, String priority) {}
+
+    /**
+     * Every space this home is owed, storey by storey, without deciding where any of it goes.
+     *
+     * <p>Exposed so the layout can be planned somewhere else — see {@code LayoutClient} — against
+     * exactly the programme this planner would have placed itself. That is the whole point of
+     * splitting the two: a remote planner that re-derived the brief could quietly plan a different
+     * house, and the customer would have no way to tell which one their estimate was costed
+     * against. Here the brief is decided once, and only the arrangement is in question.</p>
+     *
+     * <p>The stair and the shaft are deliberately absent: both are structure this planner stacks at
+     * placement time and a remote planner stacks its own way, so publishing them here would be
+     * publishing one planner's answer to the question the other is being asked. The rooms this
+     * planner walks the household through — the dining run, the shared room upstairs — are not
+     * circulation in that sense and do travel, because the customer is owed them either way.</p>
+     */
+    List<ProgrammeRoom> roomProgramme() {
+        var result = new ArrayList<ProgrammeRoom>();
+        var bedrooms = bedroomAllocation();
+        var attached = attachedBathroomAllocation(bedrooms);
+        for (var floorIndex = 0; floorIndex < floorCount; floorIndex++) {
+            var floor = floorName(floorIndex);
+            var programme = programme(floorIndex, bedrooms.get(floorIndex), attached.get(floorIndex));
+            for (var group : List.of(programme.front(), programme.hub(), programme.sleeping(),
+                    programme.service())) {
+                for (var request : group) {
+                    if (PLANNER_OWNED.contains(request.type())) continue;
+                    result.add(new ProgrammeRoom(request.type(), floor,
+                            round2(request.preferredArea()), priorityOf(request)));
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * How readily a space gives way, as the layout contract words it.
+     *
+     * <p>The planner ranks by {@link RoomSpec} priority for the core programme and by
+     * {@link #LAST_TO_KEEP} and beyond for whatever the tier or the optimizer added. Both scales
+     * collapse to the same three words here, because a remote planner needs to know what it may
+     * drop and does not need to know the order this one would have dropped it in.</p>
+     */
+    private static String priorityOf(Request request) {
+        if (request.dropPriority() >= LAST_TO_KEEP) return "OPTIONAL";
+        return request.dropPriority() <= 2 ? "REQUIRED" : "PREFERRED";
+    }
 
     /** The structural decisions taken once for the whole building, for provenance and tests. */
     Map<String, Double> plateFacts() {
         var facts = new LinkedHashMap<String, Double>();
-        facts.put("frontDepth", frontDepth(0, groundOutdoorArea(), bedroomAllocation().getFirst()));
-        facts.put("corridorWidth", corridorWidth);
+        var bedrooms = bedroomAllocation();
+        var ground = programme(0, bedrooms.getFirst(), attachedBathroomAllocation(bedrooms).getFirst());
+        facts.put("frontDepth", ground.front().isEmpty() ? 0d
+                : frontDepth(0, ground.front(), groundOutdoorArea(), bedrooms.getFirst()));
+        facts.put("hubWidth", hubWidth);
         facts.put("leftWidth", leftWidth);
         facts.put("rightWidth", rightWidth);
         facts.put("coreRun", coreRun);

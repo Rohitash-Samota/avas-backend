@@ -41,7 +41,13 @@ record CandidateScore(
             "SENIOR_BEDROOM", "FLEX_ROOM", "FLEX_GUEST_ROOM", "MULTIPURPOSE_ROOM", "STUDY",
             "HOME_OFFICE", "PRAYER_ROOM");
 
-    /** Spaces that are circulation rather than accommodation. */
+    /**
+     * Spaces that are circulation rather than accommodation.
+     *
+     * <p>{@code CORRIDOR} only appears on geometry drawn before circulation became habitable. A
+     * current plan's through-route is its dining run or its shared room, which is accommodation and
+     * is deliberately not counted here — that is what makes the share below fall.</p>
+     */
     private static final Set<String> CIRCULATION = Set.of("CORRIDOR", "STAIRCASE", "LIFT_SHAFT");
 
     /**
@@ -58,7 +64,9 @@ record CandidateScore(
             new Adjacency("KITCHEN", "UTILITY", 2),
             new Adjacency("MASTER_BEDROOM", "ATTACHED_BATHROOM", 3),
             new Adjacency("SENIOR_BEDROOM", "BATHROOM", 2),
-            new Adjacency("LIVING_ROOM", "CORRIDOR", 1));
+            // The stair reached off the hub rather than through somebody's room, which is the
+            // whole point of planning the circulation as floor the family uses.
+            new Adjacency("DINING", "STAIRCASE", 1));
 
     private record Adjacency(String first, String second, int weight) {}
 

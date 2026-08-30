@@ -72,8 +72,8 @@ class ProgrammeRoomPlacementTest {
 
     @Test
     void theProgrammeCannotRedrawTheCirculationOrTheCore() {
-        // Corridor, stair and shaft stack across storeys and are the planner's own structure; a
-        // second one placed off a programme entry would be a passage opening onto a passage.
+        // Stair and shaft stack across storeys and are the planner's own structure; a second one
+        // placed off a programme entry would be a core that does not line up with itself.
         var candidate = plan(List.of(
                 target("CORRIDOR", "GROUND", "REQUIRED"),
                 target("STAIRCASE", "GROUND", "REQUIRED"),
@@ -81,7 +81,10 @@ class ProgrammeRoomPlacementTest {
         var ground = candidate.geometry().rooms().stream()
                 .filter(room -> "GROUND".equals(room.floor())).map(RoomGeometry::type).toList();
 
-        assertThat(ground).filteredOn(RoomSpec.CORRIDOR::equals).hasSize(1);
+        // The spine is a hub now, not a corridor: circulation is habitable or it is not drawn. A
+        // programme entry asking for a passage is therefore refused outright rather than honoured
+        // once — this used to assert exactly one corridor, which was the old arrangement's rule.
+        assertThat(ground).doesNotContain(RoomSpec.CORRIDOR);
         assertThat(ground).filteredOn("STAIRCASE"::equals).hasSizeLessThanOrEqualTo(1);
         assertThat(ground).filteredOn("LIFT_SHAFT"::equals).hasSizeLessThanOrEqualTo(1);
     }

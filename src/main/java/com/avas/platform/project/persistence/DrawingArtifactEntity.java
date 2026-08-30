@@ -20,5 +20,7 @@ class DrawingArtifactEntity extends AbstractLongIdEntity {
         drawingId = value.id(); projectId = value.projectId(); version = value.version(); strategy = value.strategy();
         createdAt = value.createdAt(); update(value, payloadJson);
     }
+    String drawingId() { return drawingId; }
+    String projectId() { return projectId; }
     void update(DrawingCandidate value, String payloadJson) { status = value.status(); conceptApproved = value.conceptApproved(); this.payloadJson = payloadJson; }
 }

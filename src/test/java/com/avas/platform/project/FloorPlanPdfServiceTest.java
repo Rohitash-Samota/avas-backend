@@ -25,6 +25,85 @@ class FloorPlanPdfServiceTest {
     }
 
     @Test
+    void everyStoreyWithAGeneratedPlanGetsItsOwnPageBehindTheMeasuredOne() throws Exception {
+        var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        projects.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = projects.generateRecommendation(project.id(), "INDIVIDUAL");
+        projects.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        projects.generateDrawings(project.id(), "INDIVIDUAL");
+        var selected = projects.approveConcept(projects.drawings(project.id()).get(1).id(), "INDIVIDUAL");
+        var measured = Loader.loadPDF(pdf.generate(projects.get(project.id()), selected));
+        var measuredPages = measured.getNumberOfPages();
+        measured.close();
+
+        var bytes = pdf.generate(projects.get(project.id()), selected,
+                Map.of("GROUND", png(), "FIRST", png()));
+
+        try (var document = Loader.loadPDF(bytes)) {
+            // The whole measured set is still there. This used to be an either/or: printing the
+            // picture printed one page, and a two-storey home came back as a document describing
+            // half a house with nothing in it saying the first floor was missing.
+            assertThat(document.getNumberOfPages()).isEqualTo(measuredPages + 2);
+            var text = new PDFTextStripper().getText(document);
+            assertThat(text).contains("DUPLEX HOUSE LAYOUT");
+            // Each generated page names its own storey. Loose in a set that also holds the measured
+            // plans of two floors, an unlabelled picture gets assigned to one — probably the wrong.
+            assertThat(text).contains("GROUND FLOOR  \u2022  AI-GENERATED IMPRESSION");
+            assertThat(text).contains("FIRST FLOOR  \u2022  AI-GENERATED IMPRESSION");
+            // And says which drawing governs where the two disagree, which is the whole answer to
+            // the objection that printing both is confusing.
+            assertThat(text).contains("the measured plan governs");
+            assertThat(text).contains("ARTIST'S IMPRESSION - NOT A MEASURED DRAWING");
+        }
+    }
+
+    @Test
+    void aStoreyWithNoGeneratedPlanStillGetsItsMeasuredPage() throws Exception {
+        var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        projects.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = projects.generateRecommendation(project.id(), "INDIVIDUAL");
+        projects.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        projects.generateDrawings(project.id(), "INDIVIDUAL");
+        var selected = projects.approveConcept(projects.drawings(project.id()).get(1).id(), "INDIVIDUAL");
+        var measured = Loader.loadPDF(pdf.generate(projects.get(project.id()), selected));
+        var measuredPages = measured.getNumberOfPages();
+        measured.close();
+
+        // Only the ground floor was ever generated, which is the ordinary half-finished state.
+        var bytes = pdf.generate(projects.get(project.id()), selected, Map.of("GROUND", png()));
+
+        try (var document = Loader.loadPDF(bytes)) {
+            assertThat(document.getNumberOfPages()).isEqualTo(measuredPages + 1);
+            var text = new PDFTextStripper().getText(document);
+            assertThat(text).contains("GROUND FLOOR  \u2022  AI-GENERATED IMPRESSION");
+            assertThat(text).doesNotContain("FIRST FLOOR  \u2022  AI-GENERATED IMPRESSION");
+        }
+    }
+
+    @Test
+    void anEmptyMapOfGeneratedPlansIsTheMeasuredSetUnchanged() throws Exception {
+        var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
+        projects.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
+        var recommendation = projects.generateRecommendation(project.id(), "INDIVIDUAL");
+        projects.acceptRecommendation(project.id(), recommendation.id(), "INDIVIDUAL");
+        projects.generateDrawings(project.id(), "INDIVIDUAL");
+        var selected = projects.approveConcept(projects.drawings(project.id()).get(1).id(), "INDIVIDUAL");
+
+        var plain = pdf.generate(projects.get(project.id()), selected);
+        var withNone = pdf.generate(projects.get(project.id()), selected, Map.of());
+
+        try (var left = Loader.loadPDF(plain); var right = Loader.loadPDF(withNone)) {
+            assertThat(right.getNumberOfPages()).isEqualTo(left.getNumberOfPages());
+        }
+    }
+
+    /** A one-pixel PNG: enough for PDFBox to embed, and nothing this test cares about. */
+    private byte[] png() {
+        return java.util.Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+    }
+
+    @Test
     void rendersEverySelectedFloorAndFrozenProvenanceAsVectorPages() throws Exception {
         var project = projects.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
         projects.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
@@ -49,6 +128,10 @@ class FloorPlanPdfServiceTest {
                     .contains("PLOT DETAILS")
                     .contains("SUMMARY")
                     .contains("DOG-LEGGED STAIRCASE")
+                    .contains("USER BRIEF & BUDGET")
+                    .contains("Budget: INR 7,000,000")
+                    .contains("Priority 1: Vastu-friendly")
+                    .contains("Plot geometry: saved surveyed outline")
                     .contains("GARDEN THRESHOLD")
                     .contains("SELECTED CONCEPT")
                     .contains("AUTHORITATIVE FLOOR PLAN MAP")

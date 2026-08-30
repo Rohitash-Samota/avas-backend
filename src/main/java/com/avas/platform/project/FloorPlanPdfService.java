@@ -5,6 +5,7 @@ import org.apache.pdfbox.pdmodel.PDDocumentInformation;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
@@ -44,7 +45,33 @@ public class FloorPlanPdfService {
     };
 
     public byte[] generate(ProjectSummary project, DrawingCandidate drawing) {
+        return generate(project, drawing, null);
+    }
+
+    /**
+     * The concept PDF, carrying a generated plan for each storey that has one.
+     *
+     * <p>{@code generatedPlans} maps a storey to the picture the image model drew for it. Those
+     * pages <em>join</em> the measured set rather than replacing it, and each storey's generated
+     * page follows its own measured one so the pair is read together.</p>
+     *
+     * <p>This used to be an either/or, and printing the picture meant printing one page: the
+     * measured sheets, the site plan and every storey but the first were dropped on the floor. A
+     * customer with a two-storey home who had generated both plans downloaded a document describing
+     * half their house, and nothing in it said the first floor was missing rather than absent from
+     * the design. The reasoning behind the swap was sound — two plans of one house that disagree is
+     * worse than one — but the fix for a disagreement is to say which governs, not to delete the
+     * measured drawing. Every generated page now says so on the page itself.</p>
+     *
+     * <p>What does not change is what those pages say about themselves. A generated plan is printed
+     * with the scale, the dimensions and the room schedule removed, and a banner that says it cannot
+     * be built from — because this is the artifact that leaves the building. Somebody will hand it to
+     * a contractor, and it has to survive that without being mistaken for a drawing.</p>
+     */
+    public byte[] generate(ProjectSummary project, DrawingCandidate drawing,
+            Map<String, byte[]> generatedPlans) {
         validate(project, drawing);
+        var generated = generatedPlans == null ? Map.<String, byte[]>of() : generatedPlans;
         try (var document = new PDDocument(); var output = new ByteArrayOutputStream()) {
             setMetadata(document.getDocumentInformation(), project, drawing);
             var floors = floorKeys(drawing);
@@ -53,29 +80,44 @@ public class FloorPlanPdfService {
             // sheets behind it are the drawing a builder works from, and both are needed — a
             // presentation sheet carries no scale bar or door marks, and a working sheet cannot be
             // held up against the storey above it.
-            var sheetCount = floors.size() + 1;
+            var siteSheet = drawing.geometry().hasSiteContext();
+            var illustrated = (int) floors.stream()
+                    .filter(floor -> hasPlan(generated, floor))
+                    .count();
+            var sheetCount = 1 + (siteSheet ? 1 : 0) + floors.size() + illustrated;
             var layoutSheet = new PDPage(LayoutSheetRenderer.SHEET);
             document.addPage(layoutSheet);
             try (var canvas = new PDPageContentStream(document, layoutSheet)) {
                 new LayoutSheetRenderer(project, drawing, floors).render(canvas);
             }
+            var sheetNumber = 2;
             // The site sheet follows: a reviewer checks the legal envelope before the plan
             // that sits inside it. Older drawings carry no outline, so the set stays floors-only.
-            var siteSheet = drawing.geometry().hasSiteContext();
-            sheetCount += siteSheet ? 1 : 0;
             if (siteSheet) {
                 var page = new PDPage(PDRectangle.A4);
                 document.addPage(page);
                 try (var canvas = new PDPageContentStream(document, page)) {
-                    renderSitePlan(canvas, project, drawing, 2, sheetCount);
+                    renderSitePlan(canvas, project, drawing, sheetNumber, sheetCount);
                 }
+                sheetNumber++;
             }
-            for (var index = 0; index < floors.size(); index++) {
+            for (var floor : floors) {
                 var page = new PDPage(PDRectangle.A4);
                 document.addPage(page);
                 try (var canvas = new PDPageContentStream(document, page)) {
-                    render(canvas, project, drawing, floors.get(index),
-                            index + 2 + (siteSheet ? 1 : 0), sheetCount);
+                    render(canvas, project, drawing, floor, sheetNumber, sheetCount);
+                }
+                sheetNumber++;
+                // The generated picture of this storey, immediately behind the drawing it
+                // illustrates. Behind rather than in front, and on its own page rather than beside
+                // the plan, so a reader has met the measured sheet first and cannot mistake the two
+                // for one document.
+                if (hasPlan(generated, floor)) {
+                    var illustration = new PDPage(PDRectangle.A4);
+                    document.addPage(illustration);
+                    renderGeneratedPlan(document, illustration, project, drawing,
+                            generated.get(floor), floor, sheetNumber, sheetCount);
+                    sheetNumber++;
                 }
             }
             document.save(output);
@@ -83,6 +125,144 @@ public class FloorPlanPdfService {
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to render the floor plan PDF", exception);
         }
+    }
+
+    private static boolean hasPlan(Map<String, byte[]> plans, String floor) {
+        var plan = plans.get(floor);
+        return plan != null && plan.length > 0;
+    }
+
+    /**
+     * One storey's generated picture, on its own page behind the drawing it illustrates.
+     *
+     * <p>Deliberately spare. Everything the measured page carries that implies measurement — the
+     * scale bar, the dimension strings, the room schedule — is absent here, because none of it is
+     * true of this picture. What is left is the drawing, which storey it is of, and an unmissable
+     * statement of what it is not.</p>
+     *
+     * <p>Naming the storey is the part that matters most in a set. Loose in a document that also
+     * contains the measured plans of two floors, an unlabelled picture is a plan of no particular
+     * level and a reader will assign it to one — most likely the wrong one.</p>
+     */
+    private void renderGeneratedPlan(PDDocument document, PDPage page, ProjectSummary project,
+            DrawingCandidate drawing, byte[] plan, String floor, int sheetNumber, int sheetCount)
+            throws IOException {
+        {
+            var image = PDImageXObject.createFromByteArray(document, plan,
+                    drawing.id() + "-generated-plan-" + floor.toLowerCase(Locale.ROOT));
+            var width = page.getMediaBox().getWidth();
+            var height = page.getMediaBox().getHeight();
+
+            try (var canvas = new PDPageContentStream(document, page)) {
+                fill(canvas, PAPER, 0, 0, width, height);
+
+                // --- Masthead -------------------------------------------------------------------
+                var left = 46f;
+                var cursor = height - 58f;
+                text(canvas, BOLD, 15f, INK, "AVAS", left, cursor);
+                cursor -= 12;
+                text(canvas, REGULAR, 6.4f, MUTED, "ADAPTIVE HOME PLANNING", left, cursor);
+
+                cursor -= 44;
+                text(canvas, BOLD, 25f, INK, safe(drawing.name()), left, cursor);
+                cursor -= 20;
+                text(canvas, BOLD, 8.5f, CORAL,
+                        titleCase(floor).toUpperCase(Locale.ROOT) + " FLOOR  \u2022  "
+                                + "AI-GENERATED IMPRESSION  \u2022  "
+                                + String.format(Locale.ROOT, "%,d", drawing.builtUpArea()) + " SQ FT",
+                        left, cursor);
+
+                cursor -= 16;
+                fill(canvas, LINE, left, cursor, width - (left * 2), 0.7f);
+
+                // --- The drawing, in a card -----------------------------------------------------
+                //
+                // Fitted inside the card, never stretched: an image model returns whatever aspect
+                // ratio it likes, and a plan squashed to fill a frame is a different building.
+                var cardTop = cursor - 14f;
+                var cardFloor = 132f;
+                var cardX = left;
+                var cardWidth = width - (left * 2);
+
+                // Fitted, never stretched: an image model returns whatever aspect ratio it likes,
+                // and a plan squashed to fill a frame is a different building. The card is then
+                // sized to what was actually drawn, so a landscape plan is not framed by a tall
+                // box of empty paper.
+                var pad = 12f;
+                var scale = Math.min((cardWidth - pad * 2) / image.getWidth(),
+                        (cardTop - cardFloor - pad * 2) / image.getHeight());
+                var drawWidth = image.getWidth() * scale;
+                var drawHeight = image.getHeight() * scale;
+                var cardHeight = drawHeight + pad * 2;
+                // Centred in the space between the rule and the facts strip rather than hung from
+                // the top: a landscape plan is shorter than the space it is given, and pinning it
+                // upward puts all of that slack in one lopsided band under the drawing.
+                var cardBottom = cardFloor + ((cardTop - cardFloor) - cardHeight) / 2f;
+
+                fill(canvas, Color.WHITE, cardX, cardBottom, cardWidth, cardHeight);
+                stroke(canvas, LINE, 0.7f, cardX, cardBottom, cardWidth, cardHeight);
+                canvas.drawImage(image, cardX + (cardWidth - drawWidth) / 2f, cardBottom + pad,
+                        drawWidth, drawHeight);
+
+                // --- Facts strip ----------------------------------------------------------------
+                var stripY = 92f;
+                var stripHeight = 32f;
+                fill(canvas, Color.WHITE, left, stripY, cardWidth, stripHeight);
+                stroke(canvas, LINE, 0.7f, left, stripY, cardWidth, stripHeight);
+                var columns = cardWidth / 3f;
+                var details = project.details();
+                column(canvas, left + 12, stripY, "PLAN HIGHLIGHTS",
+                        drawing.geometry().rooms().size() + " spaces  \u2022  "
+                                + floorKeys(drawing).size() + " floor"
+                                + (floorKeys(drawing).size() == 1 ? "" : "s"));
+                column(canvas, left + columns + 12, stripY, "SPACE EFFICIENCY",
+                        drawing.spaceEfficiencyScore() + "% optimised");
+                column(canvas, left + columns * 2 + 12, stripY, "ORIENTATION",
+                        details == null ? "Not recorded"
+                                : titleCase(details.roadFacing().name()) + " facing");
+                stroke(canvas, LINE, 0.6f, left + columns, stripY, 0, stripHeight);
+                stroke(canvas, LINE, 0.6f, left + columns * 2, stripY, 0, stripHeight);
+
+                // --- The banner -----------------------------------------------------------------
+                //
+                // Above the footer rather than inside it, and in coral rather than grey, because
+                // this is the one sentence that has to survive being photocopied and handed on.
+                fill(canvas, CORAL, left, 62, cardWidth, 18);
+                text(canvas, BOLD, 7.4f, Color.WHITE,
+                        "ARTIST'S IMPRESSION - NOT A MEASURED DRAWING", left + 12, 68.5f);
+
+                // Names the measured sheet this one stands behind, because that is the whole answer
+                // to "these two plans disagree, which governs". A set that printed both and left a
+                // reader to work it out would be worse than either page alone.
+                var warning = "Generated by an image model from a description of this concept. Wall "
+                        + "positions, openings, materials, proportions and any dimensions lettered "
+                        + "into the image are invented by the model and are not this project's "
+                        + "measurements. Where this picture and the measured "
+                        + titleCase(floor).toLowerCase(Locale.ROOT)
+                        + " floor plan on the previous sheet disagree, the measured plan governs. "
+                        + "Nothing here may be scaled, costed or built from; a qualified architect "
+                        + "and structural engineer must produce the construction drawings.";
+                var line = 50f;
+                for (var value : wrap(warning, REGULAR, 5.4f, cardWidth)) {
+                    text(canvas, REGULAR, 5.4f, MUTED, value, left, line);
+                    line -= 7f;
+                }
+
+                // --- Footer ---------------------------------------------------------------------
+                text(canvas, REGULAR, 6.2f, MUTED, "AVAS \u2022 Adaptive Home Planning", left, 24);
+                var tail = safe(drawing.name()) + " \u2022 " + titleCase(floor) + " Floor \u2022 Sheet "
+                        + sheetNumber + " of " + sheetCount;
+                var tailWidth = REGULAR.getStringWidth(safe(tail)) / 1000f * 6.2f;
+                text(canvas, REGULAR, 6.2f, MUTED, tail, width - left - tailWidth, 24);
+            }
+        }
+    }
+
+    /** One labelled fact in the strip under the drawing. */
+    private void column(PDPageContentStream canvas, float x, float boxY, String label, String value)
+            throws IOException {
+        text(canvas, BOLD, 5.6f, CORAL, label, x, boxY + 20);
+        text(canvas, REGULAR, 7.4f, INK, value, x, boxY + 9);
     }
 
     private void validate(ProjectSummary project, DrawingCandidate drawing) {
@@ -1424,6 +1604,8 @@ public class FloorPlanPdfService {
         if (value == null) return "";
         return value.replace('\u2013', '-').replace('\u2014', '-').replace('\u00d7', 'x')
                 .replace('\u2018', '\'').replace('\u2019', '\'').replace('\u201c', '"').replace('\u201d', '"')
-                .replace("\u20b9", "INR ").replaceAll("[^\\x20-\\x7E]", "?");
+                // The bullet stays: it is the separator these sheets are set with, WinAnsiEncoding
+                // carries it at 0x95, and stripping it turned every "A - B" caption into "A ? B".
+                .replace("\u20b9", "INR ").replaceAll("[^\\x20-\\x7E\\u2022]", "?");
     }
 }

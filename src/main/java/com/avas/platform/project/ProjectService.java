@@ -1,5 +1,7 @@
 package com.avas.platform.project;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.avas.platform.project.persistence.ProjectPersistenceService;
 import com.avas.platform.auth.AvasPrincipal;
 import com.avas.platform.pricing.PriceCategory;
@@ -28,6 +30,7 @@ public class ProjectService {
      */
     private static final double GROUND_FLOOR_OUTDOOR_SHARE = 0.18d;
 
+    private static final Logger log = LoggerFactory.getLogger(ProjectService.class);
     private final Map<String, ProjectAggregate> projects = new ConcurrentHashMap<>();
     private final Map<String, ProjectPersistenceService.ProjectAccess> access = new ConcurrentHashMap<>();
     private final Map<String, ProjectStateSnapshot> persistedSnapshots = new ConcurrentHashMap<>();
@@ -36,6 +39,7 @@ public class ProjectService {
     private final ProjectPersistenceService persistence;
     private final CostingService costing;
     private final PlanningParameterClient planningParameters;
+    private final ProgrammeClient programmes;
 
     @Autowired
     public ProjectService(
@@ -46,13 +50,15 @@ public class ProjectService {
             @Value("${avas.versions.estimate-policy}") String estimatePolicy,
             ProjectPersistenceService persistence,
             CostingService costing,
-            PlanningParameterClient planningParameters
+            PlanningParameterClient planningParameters,
+            ProgrammeClient programmes
     ) {
         this.geometryEngine = geometryEngine;
         this.versions = Map.of("ruleVersion", rules, "knowledgeVersion", knowledge, "strategyVersion", strategy, "estimatePolicy", estimatePolicy);
         this.persistence = persistence;
         this.costing = costing;
         this.planningParameters = planningParameters;
+        this.programmes = programmes;
     }
 
     public ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy, String estimatePolicy) {
@@ -61,6 +67,7 @@ public class ProjectService {
         this.persistence = null;
         this.costing = CostingService.administrativeDefaults();
         this.planningParameters = deterministicPlanningParameters();
+        this.programmes = deterministicProgrammes();
     }
 
     ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy,
@@ -71,6 +78,7 @@ public class ProjectService {
         this.persistence = null;
         this.costing = costing;
         this.planningParameters = deterministicPlanningParameters();
+        this.programmes = deterministicProgrammes();
     }
 
     ProjectService(GeometryEngine geometryEngine, String rules, String knowledge, String strategy,
@@ -81,6 +89,7 @@ public class ProjectService {
         this.persistence = null;
         this.costing = costing;
         this.planningParameters = planningParameters;
+        this.programmes = deterministicProgrammes();
     }
 
     @PostConstruct
@@ -150,14 +159,43 @@ public class ProjectService {
         return project.summary();
     }
 
-    public synchronized Recommendation generateRecommendation(String projectId, String role) {
-        var project = requiredWithDetails(projectId);
-        project.recommendation = recommendationFor(project, false);
-        project.status = "RECOMMENDATION_READY";
-        project.updatedAt = Instant.now();
-        audit(project, "RECOMMENDATION_GENERATED", role, project.recommendation.id(), String.valueOf(project.snapshotVersion), "Deterministic rules and approved knowledge applied");
-        persist(project);
-        return project.recommendation;
+    public Recommendation generateRecommendation(String projectId, String role) {
+        // AVAS AI plans the programme, so the call is made before the monitor is taken: network I/O
+        // inside it would let one slow provider block every unrelated project mutation. The brief is
+        // frozen first and rechecked after, exactly as generateDrawings does with its own snapshot.
+        final int frozenVersion;
+        final BasicDetailsRequest frozenDetails;
+        final BuildableEnvelope frozenEnvelope;
+        final String tenantId;
+        synchronized (this) {
+            var project = requiredWithDetails(projectId);
+            frozenVersion = project.snapshotVersion;
+            frozenDetails = project.details;
+            frozenEnvelope = project.envelope();
+            tenantId = access.getOrDefault(project.id,
+                    new ProjectPersistenceService.ProjectAccess(project.id, "tenant-public", null))
+                    .tenantId();
+        }
+        var programme = programmes.plan(tenantId, projectId, "requirements-v" + frozenVersion,
+                frozenDetails, frozenEnvelope);
+        synchronized (this) {
+            var project = requiredWithDetails(projectId);
+            if (project.snapshotVersion != frozenVersion) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Project details changed while the programme was being planned; retry");
+            }
+            project.recommendation = recommendationFor(project, false, programme);
+            project.status = "RECOMMENDATION_READY";
+            project.updatedAt = Instant.now();
+            audit(project, "RECOMMENDATION_GENERATED", role, project.recommendation.id(),
+                    String.valueOf(project.snapshotVersion),
+                    programme.modelPlanned()
+                            ? "Programme planned by " + programme.provider()
+                                    + " (" + programme.model() + ")"
+                            : "Deterministic rules and approved knowledge applied");
+            persist(project);
+            return project.recommendation;
+        }
     }
 
     public Recommendation recommendation(String projectId) {
@@ -187,7 +225,12 @@ public class ProjectService {
         project.details = new BasicDetailsRequest(d.plotWidth(), d.plotLength(), d.roadFacing(), d.city(), d.floors(),
                 d.budget(), d.category(), d.family(), request.preferences(), d.parameters(), d.plotBoundary());
         project.snapshotVersion++;
-        project.recommendation = recommendationFor(project, false);
+        // Preferences change the programme — an extra bedroom, another bay — so it is planned again
+        // rather than carried over. Deliberately the deterministic answer: this runs under the
+        // monitor, and a preference edit must not wait on a network round trip. The next
+        // recommendation generated for this project asks AVAS AI again.
+        project.recommendation = recommendationFor(project, false,
+                HouseholdProgramme.deterministic(project.details, project.envelope(), null));
         project.requirementSummary = null;
         project.updatedAt = Instant.now();
         audit(project, "PREFERENCES_UPDATED", role, projectId, String.valueOf(project.snapshotVersion), String.join(", ", request.preferences()));
@@ -210,6 +253,7 @@ public class ProjectService {
         // against the same envelope the layout is later packed into, and an unbuildable plot still
         // fails with its own actionable message before any network call is made.
         final BuildableEnvelope frozenEnvelope;
+        final int nextVersion;
         synchronized (this) {
             var project = required(projectId);
             if (project.requirementSummary == null) {
@@ -220,6 +264,8 @@ public class ProjectService {
             snapshotId = project.requirementSummary.snapshotId();
             frozenDetails = project.details;
             frozenRecommendation = project.recommendation;
+            nextVersion = project.drawings.stream().mapToInt(DrawingCandidate::version)
+                    .max().orElse(0) + 1;
             tenantId = access.getOrDefault(project.id,
                     new ProjectPersistenceService.ProjectAccess(project.id, "tenant-public", null)).tenantId();
         }
@@ -227,6 +273,19 @@ public class ProjectService {
         // never block unrelated project mutations. The frozen snapshot is rechecked before commit.
         var parameters = planningParameters.optimize(tenantId, projectId, snapshotId, frozenDetails,
                 frozenEnvelope);
+        var jobId = "job-" + UUID.randomUUID();
+        var started = new DrawingJob(jobId, projectId, JobStatus.GENERATING_LAYOUTS, 45, "Generating layout strategies", List.of(), snapshotId, Instant.now(), null);
+        // Generation is outside the monitor for the same reason the parameter call is: it now
+        // reaches AVAS AI for the arrangement of each of the three options, so holding the lock
+        // across it would stall every unrelated project for as long as the slowest of those calls.
+        // Everything it reads was frozen above, and both the snapshot and the version it was
+        // planned against are rechecked before anything is committed.
+        // Generated without the remote planner. All three concepts used to be arranged by AVAS AI
+        // here — three calls, ninety seconds each, for two plans nobody opens. The arrangement is
+        // now asked for the concept somebody actually explores; see `arrangeWithAi`.
+        var generated = geometryEngine.generate(projectId, nextVersion, frozenDetails,
+                frozenRecommendation, versions, parameters, frozenEnvelope, tenantId, snapshotId,
+                null, false);
         synchronized (this) {
         var project = required(projectId);
         if (project.requirementSummary == null
@@ -234,11 +293,14 @@ public class ProjectService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Project requirements changed while planning parameters were generated; retry");
         }
-        var jobId = "job-" + UUID.randomUUID();
-        var started = new DrawingJob(jobId, projectId, JobStatus.GENERATING_LAYOUTS, 45, "Generating layout strategies", List.of(), snapshotId, Instant.now(), null);
-        var nextVersion = project.drawings.stream().mapToInt(DrawingCandidate::version).max().orElse(0) + 1;
-        var generated = geometryEngine.generate(projectId, nextVersion, frozenDetails,
-                frozenRecommendation, versions, parameters, requireBuildableEnvelope(project));
+        // A concurrent generation that landed while this one was planning would otherwise commit a
+        // second set of candidates stamped with the same version, and the customer would be shown
+        // six concepts where the workflow promises three.
+        var landed = project.drawings.stream().mapToInt(DrawingCandidate::version).max().orElse(0) + 1;
+        if (landed != nextVersion) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Another drawing generation completed while this one was planning; retry");
+        }
         var generatedEstimates = new ArrayList<Estimate>();
         for (var drawing : generated) {
             generatedEstimates.add(estimateFor(project, drawing, project.estimates.size()
@@ -248,6 +310,8 @@ public class ProjectService {
         // estimates succeed. A retry can never observe or version from partial artifacts.
         project.drawings.addAll(generated);
         project.estimates.addAll(generatedEstimates);
+        // Kept so a later arrangement re-plans the same programme these three were costed against.
+        project.parameterSet = parameters;
         project.status = generated.stream().anyMatch(d -> "EXPERT_REVIEW".equals(d.status())) ? "REVIEW_REQUIRED" : "CONCEPTS_READY";
         project.updatedAt = Instant.now();
         var completed = new DrawingJob(jobId, projectId, JobStatus.COMPLETED, 100, "Rendered and validated", generated.stream().map(DrawingCandidate::id).toList(), snapshotId, started.createdAt(), Instant.now());
@@ -291,6 +355,73 @@ public class ProjectService {
     }
 
     public DrawingCandidate drawing(String drawingId) { return findDrawing(drawingId).drawing; }
+
+    /**
+     * Arrange one concept with AVAS AI, in place, and keep the result.
+     *
+     * <p>The concept is already drawn when this is called — generation packs all three with the
+     * deterministic planner, which is instant and free. This asks the model to arrange the rooms
+     * <em>that concept already has</em>: same programme, same room count, so the built-up area and
+     * the cost the card advertises still describe the home. Only where the rooms sit changes.</p>
+     *
+     * <p>Idempotent by intent. A concept already arranged by a model is returned untouched, so
+     * reopening it costs nothing and — more importantly — shows the same plan. Re-running would give
+     * a different arrangement of the same rooms, and a customer comparing three concepts cannot do
+     * that if one of them rearranges itself every time they look at it.</p>
+     *
+     * <p>A refusal is not an error. The model's arrangement can still fail the checks, the service
+     * can be down, and the parameter set is gone after a restart — in every case the concept keeps
+     * the plan it already had, which is a plan worth having.</p>
+     */
+    public synchronized DrawingCandidate arrangeWithAi(String drawingId, String tenantId, String role) {
+        var found = findDrawing(drawingId);
+        var project = found.project;
+        var existing = found.drawing;
+        if (aiArranged(existing)) return existing;
+        if (project.parameterSet == null || project.details == null || project.recommendation == null) {
+            return existing;
+        }
+        var latest = project.drawings.stream().mapToInt(DrawingCandidate::version).max().orElse(0);
+        if (existing.version() != latest) return existing;
+
+        var contextVersion = project.requirementSummary == null
+                ? "drawing-v" + existing.version() : project.requirementSummary.snapshotId();
+        List<DrawingCandidate> replanned;
+        try {
+            replanned = geometryEngine.generate(project.id, existing.version(), project.details,
+                    project.recommendation, versions, project.parameterSet, project.envelope(),
+                    tenantId, contextVersion, existing.strategy(), true);
+        } catch (RuntimeException exception) {
+            log.warn("ai_arrangement_failed drawing={} reason={}", drawingId, exception.getMessage());
+            return existing;
+        }
+        if (replanned.isEmpty()) return existing;
+        var drawn = replanned.get(0);
+        if (!aiArranged(drawn)) {
+            // The service answered from its own rules, or its arrangement was refused. Keeping the
+            // plan already on screen is better than swapping in a second deterministic plan that
+            // differs from it for no reason the customer could be told.
+            return existing;
+        }
+        // The selection flag belongs to the customer, not to the planner that drew the rooms.
+        var merged = new DrawingCandidate(drawn.id(), drawn.projectId(), drawn.version(),
+                drawn.strategy(), drawn.name(), drawn.builtUpArea(), drawn.estimatedCostLow(),
+                drawn.estimatedCostHigh(), drawn.vastuScore(), drawn.naturalLightScore(),
+                drawn.spaceEfficiencyScore(), drawn.confidence(), drawn.geometry(),
+                drawn.hardViolations(), drawn.softRecommendations(), drawn.explanations(),
+                drawn.versions(), drawn.status(), existing.conceptApproved(), existing.createdAt());
+        project.drawings.set(found.index, merged);
+        project.updatedAt = Instant.now();
+        audit(project, "LAYOUT_ARRANGED_BY_AI", role, merged.id(), String.valueOf(merged.version()),
+                "Rooms arranged by " + merged.versions().getOrDefault("generationModel", "a model"));
+        persist(project);
+        return merged;
+    }
+
+    /** True when a model, rather than the rules, decided where this concept's rooms sit. */
+    private boolean aiArranged(DrawingCandidate drawing) {
+        return "AI_ASSISTED".equals(drawing.versions().get("generationMode"));
+    }
 
     public synchronized RevisionReceipt feedback(String drawingId, FeedbackRequest request, String role) {
         var found = findDrawing(drawingId);
@@ -444,15 +575,19 @@ public class ProjectService {
         }).sum();
     }
 
-    private Recommendation recommendationFor(ProjectAggregate project, boolean accepted) {
+    /**
+     * The brief a customer approves, built around the programme AVAS AI planned for this household.
+     *
+     * <p>The programme arrives already decided — how many bedrooms, how many of them are suites,
+     * how many bays. Everything left here is arithmetic on top of it: the built-up band the plot
+     * supports, the rate that band is costed at, and the provenance that says which route answered.
+     * The bedroom count used to be computed here as well, from the headcount alone, which is how a
+     * four-person household on a three-thousand square foot plot was planned two bedrooms and given
+     * a study, a home office and a multipurpose room in place of the rest.</p>
+     */
+    private Recommendation recommendationFor(ProjectAggregate project, boolean accepted,
+            HouseholdProgramme programme) {
         var d = project.details;
-        var members = d.family().members();
-        var wanted = LifestylePreferences.of(d.preferences());
-        // The household's own rule, so the brief a customer reads, the parameter targets and the
-        // planned programme cannot drift apart the way three separate copies of it did — plus
-        // whatever the customer asked for on top of it, which until now was stored and ignored.
-        var bedrooms = wanted.bedroomsFor(d.family());
-        var attachedBathrooms = Math.max(1, bedrooms > 3 ? bedrooms - 1 : bedrooms - (bedrooms > 1 ? 1 : 0));
         // Target the same footprint the geometry engine will pack into, so a candidate is never
         // measured against an area the envelope could not have produced.
         var builtUp = (int) Math.round(
@@ -460,30 +595,37 @@ public class ProjectService {
         var category = d.category() == Category.NOT_SURE ? (d.budget() / Math.max(1, builtUp) >= 3000 ? "LUXURY" : d.budget() / Math.max(1, builtUp) >= 2200 ? "PREMIUM" : "STANDARD") : d.category().name();
         var rate = switch (category) { case "LUXURY" -> 3300; case "PREMIUM" -> 2600; default -> 1950; };
         var expected = (long) builtUp * rate;
-        var guestReason = d.family().regularGuests()
-                ? "A preferred flex/guest room is included without changing the permanent bedroom count"
-                : "No separate regular-guest room was requested";
-        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion, bedrooms + "-bedroom " + (d.floors() > 1 ? "duplex" : "family home"), category, bedrooms, attachedBathrooms, 1, wanted.parkingFor(d.parameters()), round10(builtUp * .92), round10(builtUp * 1.08), roundLakh(expected * .93), roundLakh(expected * 1.09), d.family().seniorCitizens() > 0, members >= 4, wanted.futureExpansion(), 92, reasonsFor(d, members, bedrooms, category, guestReason, wanted), Map.of("rule", versions.get("ruleVersion"), "knowledge", versions.get("knowledgeVersion"), "method", "deterministic-recommendation-1.2"), accepted);
+        return new Recommendation("rec-" + project.id + "-v" + project.snapshotVersion,
+                programme.title(), category, programme.bedrooms(), programme.attachedBathrooms(),
+                programme.commonBathrooms(), programme.parkingCars(),
+                round10(builtUp * .92), round10(builtUp * 1.08),
+                roundLakh(expected * .93), roundLakh(expected * 1.09),
+                programme.seniorBedroom(), programme.familyLounge(), programme.futureExpansion(),
+                92, programme.reasons(), provenanceFor(programme), accepted);
     }
 
     /**
-     * What the brief says, with the customer's own priorities said back to them.
+     * Where this brief came from, in enough detail to tell a planned home from a fallback.
      *
-     * <p>A preference that changes the plan and is never mentioned is indistinguishable from one
-     * that was ignored, which is what every chip but future expansion previously was.</p>
+     * <p>Every failure in the AI path degrades to a complete, plausible programme, so the only thing
+     * that distinguishes a home a model planned from one the rules stood in for is written here. A
+     * {@code programmeFallback} entry means the service was asked and could not answer, and carries
+     * its own reason.</p>
      */
-    private List<String> reasonsFor(BasicDetailsRequest d, int members, int bedrooms, String category,
-            String guestReason, LifestylePreferences wanted) {
-        var reasons = new ArrayList<String>();
-        reasons.add(members + " permanent family members share " + bedrooms
-                + " core bedrooms at two per room");
-        reasons.add(d.plotWidth() + " × " + d.plotLength() + " ft "
-                + d.roadFacing().name().toLowerCase() + "-facing plot");
-        reasons.add(guestReason);
-        reasons.add(category + " specification calibrated to the approved budget");
-        reasons.addAll(wanted.reasons());
-        reasons.add("Hard rules are checked before lifestyle ranking");
-        return List.copyOf(reasons);
+    private Map<String, String> provenanceFor(HouseholdProgramme programme) {
+        var provenance = new java.util.LinkedHashMap<String, String>();
+        provenance.put("rule", versions.get("ruleVersion"));
+        provenance.put("knowledge", versions.get("knowledgeVersion"));
+        provenance.put("method", programme.modelPlanned()
+                ? "ai-programme-1.0" : "deterministic-recommendation-1.3");
+        provenance.put("programmeProvider", programme.provider());
+        provenance.put("programmeModel", programme.model());
+        if (programme.fallbackUsed()) {
+            provenance.put("programmeFallback", programme.warnings().isEmpty()
+                    ? "The configured programme provider could not answer"
+                    : String.join("; ", programme.warnings()));
+        }
+        return Map.copyOf(provenance);
     }
 
     private RequirementSummary requirementFor(ProjectAggregate project) {
@@ -558,6 +700,11 @@ public class ProjectService {
     }
     private int round10(double value) { return (int) Math.round(value / 10.0) * 10; }
     private long roundLakh(double value) { return Math.round(value / 100_000.0) * 100_000; }
+
+    private static ProgrammeClient deterministicProgrammes() {
+        return (tenantId, projectId, contextVersion, details, envelope) ->
+                HouseholdProgramme.deterministic(details, envelope, null);
+    }
 
     private static PlanningParameterClient deterministicPlanningParameters() {
         return (tenantId, projectId, contextVersion, details, envelope) ->

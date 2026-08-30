@@ -92,6 +92,34 @@ avas:
     # optimization and is given the longer timeout an image or PDF reading needs.
     outline-enabled: ${AVAS_AI_OUTLINE_ENABLED:false}
     outline-timeout-seconds: ${AVAS_AI_OUTLINE_TIMEOUT_SECONDS:45}
+    # Where the rooms go, as opposed to which rooms there are. Enabling this hands the arrangement
+    # to AVAS AI, which plans an open hub — the entrance opening into the living-dining run, every
+    # room taking its door off it — instead of the double-loaded corridor `FloorPlanner` draws.
+    # Disabled here, the platform plans locally and every storey still carries a corridor.
+    #
+    # Enabled separately from parameter optimization because it costs differently: one call per
+    # strategy, so three per generation, each carrying the whole programme and returning every room
+    # on every storey. A layout that fails to arrive, fails to validate, or comes back with a
+    # corridor in it is refused and the local planner draws that option instead, so the customer
+    # always gets three concepts.
+    layout-enabled: ${AVAS_AI_LAYOUT_ENABLED:true}
+    # Longer than the programme budget: this is the largest reply the service produces, and on a
+    # reasoning model the thinking is drawn from the same ceiling before the first room is emitted.
+    layout-timeout-seconds: ${AVAS_AI_LAYOUT_TIMEOUT_SECONDS:120}
+    # A generated picture of a concept, shown beside the measured plan and never instead of it.
+    #
+    # Off by default and deliberately a separate switch from every other AI route, because it is the
+    # only one whose answer is not adopted: nothing here is validated, costed or drawn from. A
+    # diffusion model asked for an architectural drawing does not decline — it returns convincing
+    # linework over invented dimensions — so the platform keeps drawing its own plan and this buys
+    # the customer a look at the house, labelled as an illustration wherever it is shown.
+    #
+    # Disabled, `GET /drawings/{id}/render` answers 204 and the UI shows the plan alone.
+    render-enabled: ${AVAS_AI_RENDER_ENABLED:false}
+    # Far longer than the other budgets. A diffusion model on a cold pipeline spends its first call
+    # loading tens of gigabytes of weights, and every call after that is seconds rather than
+    # milliseconds. Nothing waits on it: the plan is already on screen when the picture arrives.
+    render-timeout-seconds: ${AVAS_AI_RENDER_TIMEOUT_SECONDS:180}
   bootstrap-admin:
     enabled: ${AVAS_BOOTSTRAP_ADMIN_ENABLED:false}
     first-name: ${AVAS_BOOTSTRAP_ADMIN_FIRST_NAME:Platform}

@@ -54,16 +54,32 @@ class FloorPlannerTest {
         });
     }
 
+    /** The rooms a plan is allowed to circulate through, now that no plan draws a passage. */
+    private static final List<String> HUB = List.of("LIVING_ROOM", "DINING", "FAMILY_LOUNGE",
+            "MULTIPURPOSE_ROOM", "FOYER");
+
     @Test
-    void everyStoreyHasACirculationSpineAndNoRoomIsReachedThroughABedroom() {
+    void noStoreyIsDrawnWithACorridor() {
+        // The whole point of the hub: circulation is floor the family uses, or it is not drawn.
+        // A passage running the depth of a storey is about forty square feet a floor spent on
+        // walking, and the customer is charged for every one of them.
+        forEveryPlan((plot, floors, candidate) -> assertThat(candidate.geometry().rooms())
+                .as("a %s ft plot with %s floor(s) was planned with a corridor", plot, floors)
+                .noneMatch(room -> RoomSpec.CORRIDOR.equals(room.type())));
+    }
+
+    @Test
+    void everyStoreyHasHabitableCirculationAndNoRoomIsReachedThroughABedroom() {
         forEveryPlan((plot, floors, candidate) -> {
             var geometry = candidate.geometry();
             var roomsById = geometry.rooms().stream()
                     .collect(java.util.stream.Collectors.toMap(RoomGeometry::id, room -> room));
             for (var floor : List.of("GROUND", "FIRST", "SECOND").subList(0, floors)) {
+                // Without a passage, the storey still has to have somewhere the household walks
+                // through. A floor of rooms and nothing else is a floor entered through a bedroom.
                 assertThat(geometry.rooms())
-                        .as("%s floor of a %s ft plot has no passage", floor, plot)
-                        .anyMatch(room -> floor.equals(room.floor()) && RoomSpec.CORRIDOR.equals(room.type()));
+                        .as("%s floor of a %s ft plot has nothing to circulate through", floor, plot)
+                        .anyMatch(room -> floor.equals(room.floor()) && HUB.contains(room.type()));
             }
             for (var door : geometry.doors()) {
                 var connected = door.get("connectsRoomId");
@@ -71,14 +87,16 @@ class FloorPlannerTest {
                 var from = roomsById.get(String.valueOf(door.get("roomId")));
                 var to = roomsById.get(String.valueOf(connected));
                 if (from == null || to == null) continue;
-                // A door out of a bedroom leads to the passage or to something that belongs to that
+                // A door out of a bedroom leads to the hub or to something that belongs to that
                 // bedroom: its bathroom, its dressing room, its store, its balcony. Never to a
                 // kitchen, a stair or another bedroom.
                 if (from.type().endsWith("BEDROOM")) {
+                    var allowed = new java.util.ArrayList<>(HUB);
+                    allowed.addAll(List.of("ATTACHED_BATHROOM", "DRESSING_ROOM", "STORE",
+                            "BALCONY", "TERRACE"));
                     assertThat(to.type())
                             .as("%s on a %s ft plot is entered through %s", to.type(), plot, from.type())
-                            .isIn(RoomSpec.CORRIDOR, "ATTACHED_BATHROOM", "DRESSING_ROOM", "STORE",
-                                    "BALCONY", "TERRACE");
+                            .isIn(allowed.toArray());
                 }
             }
         });

@@ -24,6 +24,18 @@ final class ProjectAggregate {
     private BuildableEnvelope envelope;
     Recommendation recommendation;
     RequirementSummary requirementSummary;
+    /**
+     * The parameter set the current concept set was generated from.
+     *
+     * <p>Held so that arranging one concept with AVAS AI later reuses the programme that concept was
+     * costed against. Re-fetching it would ask the parameter model the same question a second time
+     * and quite possibly get a different answer — and a concept whose card promises four bedrooms
+     * must not be re-planned as a three-bedroom house because the arrangement ran an hour later.</p>
+     *
+     * <p>Null after a reload, because it is derived state rather than stored state. A lazy
+     * arrangement then declines rather than guessing; the concept keeps the plan it already has.</p>
+     */
+    PlanningParameterSet parameterSet;
     final List<DrawingCandidate> drawings = new ArrayList<>();
     final List<DrawingJob> jobs = new ArrayList<>();
     final List<Estimate> estimates = new ArrayList<>();
@@ -67,7 +79,7 @@ final class ProjectAggregate {
             var boundary = details.boundary();
             envelope = BuildableEnvelope.derive(boundary,
                     SetbackRule.forUsage(boundary, details.floors(), details.parameters().plotUsage()),
-                    details.floors());
+                    details.floors(), details.roadFacing(), details.parameters().parkingCars());
         }
         return envelope;
     }

@@ -73,6 +73,16 @@ final class LayoutSheetRenderer {
     private static final Color WINDOW = new Color(70, 116, 146);
     private static final Color ACCENT = new Color(170, 116, 74);
 
+    /**
+     * Wall thicknesses, in planning feet, used as a drawing convention rather than a detail.
+     *
+     * <p>A four and a half inch partition and a nine inch external wall are what this market builds
+     * in, and drawing them at that weight is what makes a plan read as enclosure. They are not a
+     * construction specification: the structural grid remains a licensed professional's work.</p>
+     */
+    private static final float PARTITION_WALL_FEET = .375f;
+    private static final float EXTERNAL_WALL_FEET = .75f;
+
     private final ProjectSummary project;
     private final DrawingCandidate drawing;
     private final GeometryDocument geometry;
@@ -325,10 +335,19 @@ final class LayoutSheetRenderer {
      * at the same weight, which is what makes a plan look like a stack of boxes instead of a
      * building.</p>
      */
+    /**
+     * The walls between rooms, drawn at the weight a wall is actually built to.
+     *
+     * <p>A stroke is centred on the path, so a line this thick reads as the poché a plan is drawn
+     * with — a solid band of wall — rather than as an outline around a coloured rectangle. At a
+     * tenth of a foot the partitions were hairlines, and the drawing looked like a chart of
+     * adjacent areas instead of a building with structure in it.</p>
+     */
     private void renderPartitions(PDPageContentStream canvas, List<RoomGeometry> rooms,
             float originX, float originY, float scale) throws IOException {
         for (var room : rooms) {
-            strokeRoom(canvas, WALL, Math.max(.7f, scale * .10f), room, originX, originY, scale);
+            strokeRoom(canvas, WALL, Math.max(1.1f, scale * PARTITION_WALL_FEET), room, originX,
+                    originY, scale);
         }
     }
 
@@ -336,7 +355,7 @@ final class LayoutSheetRenderer {
             float originX, float originY, float scale) throws IOException {
         var bounds = boundsOf(rooms);
         if (bounds == null) return;
-        stroke(canvas, WALL, Math.max(1.6f, scale * .26f),
+        stroke(canvas, WALL, Math.max(2.4f, scale * EXTERNAL_WALL_FEET),
                 originX + (float) bounds[0] * scale, originY + (float) bounds[1] * scale,
                 (float) (bounds[2] - bounds[0]) * scale, (float) (bounds[3] - bounds[1]) * scale);
     }
@@ -597,8 +616,7 @@ final class LayoutSheetRenderer {
         var cursor = PLATE_TOP;
         cursor = renderPlotDetails(canvas, cursor);
         cursor = renderSummary(canvas, cursor - 18);
-        cursor = renderStaircase(canvas, cursor - 18);
-        renderCompass(canvas, PANEL_X + PANEL_WIDTH / 2, cursor - 62);
+        renderClientBrief(canvas, cursor - 18);
     }
 
     private float renderPlotDetails(PDPageContentStream canvas, float top) throws IOException {
@@ -609,6 +627,8 @@ final class LayoutSheetRenderer {
         rows.put("Facing", titleCase(project.details().roadFacing().name()));
         rows.put("Floors", String.valueOf(floors.size()));
         rows.put("Specification", tier.displayName());
+        rows.put("Budget", String.format(Locale.ROOT, "%.1f lakh",
+                project.details().budget() / 100_000d));
         return renderCard(canvas, "PLOT DETAILS", top, rows, false);
     }
 
@@ -704,6 +724,73 @@ final class LayoutSheetRenderer {
                 line(canvas, ACCENT, .55f, x + 1f, y + 3.2f, x + 9f, y + 3.2f);
             }
         }
+    }
+
+    /**
+     * The user's inputs beside the measured plans, so the PDF records what the drawing answered.
+     *
+     * <p>These are deliberately the saved brief values, not facts inferred back out of geometry.
+     * A future lift shaft and a working lift occupy the same square on a plan, and no coordinate
+     * reading can recover which one the customer selected.</p>
+     */
+    private void renderClientBrief(PDPageContentStream canvas, float top) throws IOException {
+        var bottom = 96f;
+        var height = Math.max(120f, top - bottom);
+        card(canvas, PANEL_X, bottom, PANEL_WIDTH, height);
+        text(canvas, BOLD, 8.4f, INK, "USER BRIEF & BUDGET", PANEL_X + 14, top - 18);
+        line(canvas, HAIRLINE, .6f, PANEL_X + 14, top - 25,
+                PANEL_X + PANEL_WIDTH - 14, top - 25);
+
+        var lines = clientBriefLines();
+        var availableHeight = Math.max(72f, height - 39f);
+        var spacing = Math.min(13f, availableHeight / Math.max(1, lines.size()));
+        var y = top - 38f;
+        for (var value : lines) {
+            var size = 5.8f;
+            while (size > 3.8f
+                    && textWidth(REGULAR, size, value) > PANEL_WIDTH - 28f) {
+                size -= .2f;
+            }
+            text(canvas, REGULAR, size, MUTED, value, PANEL_X + 14, y);
+            y -= spacing;
+        }
+    }
+
+    private List<String> clientBriefLines() {
+        var details = project.details();
+        var family = details.family();
+        var lines = new ArrayList<String>();
+        lines.add("Budget: INR " + String.format(Locale.ROOT, "%,d", details.budget())
+                + " | " + titleCase(details.category().name()) + " finish");
+        lines.add("Household: " + family.adults() + " adults | " + family.children()
+                + " children | " + family.seniorCitizens() + " seniors | guests "
+                + yesNo(family.regularGuests()));
+        lines.add("Home: " + titleCase(parameters.homeType()) + " | "
+                + floors.size() + (floors.size() == 1 ? " floor" : " floors"));
+        lines.add("Vertical: " + titleCase(parameters.staircaseType()) + " stair | lift "
+                + titleCase(parameters.liftProvision()));
+        lines.add("Outdoor: " + parameters.balconyCount() + " balconies | terrace "
+                + yesNo(parameters.terraceRequired()) + " | courtyard "
+                + yesNo(parameters.courtyardRequired()));
+        lines.add("Access: step-free ground " + yesNo(parameters.accessibleGroundFloor()));
+        lines.add("Parking / site: " + parameters.parkingCars() + " cars | "
+                + titleCase(parameters.plotUsage()));
+        lines.add("Services: solar " + yesNo(parameters.solarReady()) + " | rainwater "
+                + yesNo(parameters.rainwaterHarvesting()));
+        lines.add("Plot geometry: " + (geometry.hasSiteContext()
+                ? "saved surveyed outline" : "saved rectangular dimensions"));
+        if (details.preferences().isEmpty()) {
+            lines.add("Priorities: none recorded");
+        } else {
+            for (var index = 0; index < details.preferences().size(); index++) {
+                lines.add("Priority " + (index + 1) + ": " + details.preferences().get(index));
+            }
+        }
+        return lines;
+    }
+
+    private String yesNo(boolean value) {
+        return value ? "yes" : "no";
     }
 
     /**
@@ -1104,12 +1191,20 @@ final class LayoutSheetRenderer {
         var carDepth = Math.min((rowAlongX ? height : width) * .86f, bayDepth * .92f * scale);
         if (carRun < 4 || carDepth < 4) return;
 
+        // Which way the car itself lies, as opposed to which way the row of them runs. Nose-in off a
+        // north road puts the car's length across the plot; standing along that same boundary puts
+        // it along the road. Hardcoding the two branches drew every parallel-parked car rotated a
+        // quarter turn from the bay it was standing in, so its nose and cabin were pressed into its
+        // own flanks and it read as a crate rather than a vehicle.
+        var lengthAlongY = rowAlongX == noseIn;
         for (var index = 0; index < bays; index++) {
             var offset = slot * index + (slot - carRun) / 2;
             if (rowAlongX) {
-                renderCar(canvas, x + offset, y + (height - carDepth) / 2, carRun, carDepth, true);
+                renderCar(canvas, x + offset, y + (height - carDepth) / 2, carRun, carDepth,
+                        lengthAlongY);
             } else {
-                renderCar(canvas, x + (width - carDepth) / 2, y + offset, carDepth, carRun, false);
+                renderCar(canvas, x + (width - carDepth) / 2, y + offset, carDepth, carRun,
+                        lengthAlongY);
             }
             if (index > 0) {
                 if (rowAlongX) {

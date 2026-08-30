@@ -26,10 +26,13 @@ class GeometryEngineTest {
                 // gap: something the brief asked for that this plot genuinely cannot carry.
                 assertThat(candidate.hardViolations()).allMatch(value -> value.startsWith("Programme gap:"));
                 // Two storeys of this plate carry the whole brief; one storey cannot, and says so
-                // rather than drawing a bedroom nobody could sleep in.
+                // rather than drawing a bedroom nobody could sleep in. The single storey now places
+                // the bedrooms and their bathrooms — a promised bedroom outranks the optional spaces
+                // that used to crowd it out — so what it reports short is the lounge and the area.
                 assertThat(candidate.hardViolations())
-                        .filteredOn(value -> value.contains("attached bathrooms represented"))
-                        .hasSize(floors == 1 ? 1 : 0);
+                        .filteredOn(value -> value.contains("bedrooms represented")
+                                || value.contains("attached bathrooms represented"))
+                        .isEmpty();
                 var areaGap = "Programme gap: placed built-up area " + candidate.builtUpArea()
                         + " sq ft is outside recommended 2400-2800 sq ft cost basis";
                 if (candidate.builtUpArea() < 2400 * .98 || candidate.builtUpArea() > 2800 * 1.02) {
@@ -75,9 +78,14 @@ class GeometryEngineTest {
                             .hasSize(1);
                 }
                 if (floors == 1) {
+                    // Parking is not among them any more: the building is held back from the road
+                    // so the cars stand on the approach instead of inside a single storey that can
+                    // least afford to carry them.
                     assertThat(geometry.rooms()).extracting(RoomGeometry::type)
-                            .contains("PARKING", "LIVING_ROOM", "KITCHEN", "BATHROOM", "CORRIDOR")
-                            .doesNotContain("STAIRCASE", "LIFT_SHAFT");
+                            .contains("LIVING_ROOM", "KITCHEN", "BATHROOM", "CORRIDOR")
+                            .doesNotContain("STAIRCASE", "LIFT_SHAFT", "PARKING");
+                    assertThat(geometry.siteElements())
+                            .anyMatch(element -> element.type().equals("OUTDOOR_PARKING"));
                 }
                 assertThat(candidate.versions())
                         .containsEntry("generator", "AVAS deterministic layout engine")
@@ -634,15 +642,15 @@ class GeometryEngineTest {
     }
 
     /**
-     * A garden on an ordinary plot, where the only ground deep enough to plant is the front setback.
+     * A garden and a driveway on the same ordinary plot, rather than one instead of the other.
      *
-     * <p>The approach band used to be withheld from the garden whether or not a car ended up on it.
-     * A front setback shallower than a car is wide — which is most of them — therefore produced no
-     * parking *and* no garden, and "setbacks with garden" drew exactly what plain standard setbacks
-     * drew. The band is only spoken for when a bay is actually placed on it.</p>
+     * <p>The approach band used to be withheld from the garden by an identity test against a
+     * rectangle built by a separate call, which could never match — so the lawn was drawn over the
+     * bays, and over the cars parked on them. Measuring the open ground with the bays already
+     * standing on it puts the planting beside the driveway, which is where it is on a real plot.</p>
      */
     @Test
-    void openSpaceDrawsAGardenWhenTheApproachIsTooShallowToParkOn() {
+    void openSpaceDrawsAGardenBesideTheDrivewayRatherThanOverIt() {
         var parameters = new HomeParameters("BUNGALOW", "DOG_LEGGED", "NONE", 0, false, false,
                 false, 1, false, false, HomeParameters.OPEN_SPACE);
         var details = new BasicDetailsRequest(30, 60, Facing.NORTH, "Jaipur", 1, 4_000_000,
@@ -652,10 +660,17 @@ class GeometryEngineTest {
                 versions()).getFirst();
 
         var elements = candidate.geometry().siteElements();
-        // The setback ring here is 7.5 ft at the front: too shallow for the 8.5 ft a car needs
-        // across, so nothing parks outside and the band is free to be planted.
-        assertThat(elements).noneMatch(element -> element.type().equals("OUTDOOR_PARKING"));
+        assertThat(elements).anyMatch(element -> element.type().equals("OUTDOOR_PARKING"));
         assertThat(elements).anyMatch(element -> element.type().equals("GARDEN"));
+        // No planted rectangle stands on the bays.
+        var bays = elements.stream().filter(element -> element.type().equals("OUTDOOR_PARKING"))
+                .findFirst().orElseThrow();
+        assertThat(elements).filteredOn(element -> element.type().equals("GARDEN"))
+                .allSatisfy(garden -> assertThat(
+                        garden.x() < bays.x() + bays.width() - .01
+                                && garden.x() + garden.width() > bays.x() + .01
+                                && garden.y() < bays.y() + bays.length() - .01
+                                && garden.y() + garden.length() > bays.y() + .01).isFalse());
     }
 
     /**

@@ -24,6 +24,14 @@ services:
       AVAS_AI_BASE_URL: ${AVAS_AI_BASE_URL:-http://host.docker.internal:8090}
       AVAS_AI_SERVICE_KEY: ${AVAS_AI_SERVICE_KEY:-}
       AVAS_AI_OUTLINE_ENABLED: ${AVAS_AI_OUTLINE_ENABLED:-true}
+      # A generated picture of a concept, shown beside the measured plan and never instead of it.
+      # Needs AVAS_AI_DRAWING_PROVIDER=flux on the AI service too; without it this route answers
+      # 204 and the UI shows the measured plan alone, which is what it would have shown anyway.
+      AVAS_AI_RENDER_ENABLED: ${AVAS_AI_RENDER_ENABLED:-false}
+      # Generous for local development on purpose: the first render after the AI service restarts
+      # loads tens of gigabytes of weights before it draws anything, and this client is the shorter
+      # of the two ceilings in practice.
+      AVAS_AI_RENDER_TIMEOUT_SECONDS: ${AVAS_AI_RENDER_TIMEOUT_SECONDS:-600}
     ports:
       - "8080:8080"
     extra_hosts:

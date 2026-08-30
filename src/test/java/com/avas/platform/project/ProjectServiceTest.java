@@ -49,7 +49,8 @@ class ProjectServiceTest {
             assertThat(geometry.setbacks().side()).isZero();
             assertThat(geometry.setbacks().source()).isEqualTo(SetbackRule.WAIVED);
             assertThat(geometry.buildableArea()).isEqualTo(geometry.plotArea());
-            // Nothing is planned outside the building, so the cars are planned inside it.
+            // Nothing is planned outside the building, so the cars are planned inside it. The
+            // hold-back that parks them on the approach has no ground to take here.
             assertThat(geometry.siteElements()).isEmpty();
             assertThat(geometry.rooms()).anyMatch(room -> room.type().contains("PARKING"));
             assertThat(drawing.softRecommendations())
@@ -60,12 +61,15 @@ class ProjectServiceTest {
     }
 
     @Test
-    void sharesRoomsTwoToAFamilyMemberAndKeepsTheSeniorOnTheGroundFloor() {
+    void givesEachChildARoomOnAPlotThatCanCarryOneAndKeepsTheSeniorOnTheGroundFloor() {
         var project = service.create(new CreateProjectRequest("Family home", StartMode.PLOT), "INDIVIDUAL");
         service.updateBasicDetails(project.id(), details(), "INDIVIDUAL");
         var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
 
-        assertThat(recommendation.bedrooms()).isEqualTo(3);
+        // Two adults sharing, a room for each of the two children, and the senior's own room. The
+        // headcount rule alone would have had the children share and planned three, on a plot that
+        // encloses nearly three thousand square feet across two storeys.
+        assertThat(recommendation.bedrooms()).isEqualTo(4);
         assertThat(recommendation.category()).isEqualTo("PREMIUM");
         assertThat(recommendation.seniorCitizenBedroom()).isTrue();
         assertThat(recommendation.confidence()).isEqualTo(92);
@@ -73,7 +77,7 @@ class ProjectServiceTest {
     }
 
     @Test
-    void usesAdultHeadcountAndKeepsRegularGuestsAsAPreferredFlexRoom() {
+    void adultsShareAtTwoToARoomAndRegularGuestsStillGetAFlexRoomRatherThanABedroom() {
         var project = service.create(new CreateProjectRequest("Shared family home", StartMode.PLOT),
                 "INDIVIDUAL");
         var details = new BasicDetailsRequest(45, 65, Facing.EAST, "Jaipur", 2, 8_000_000,
@@ -82,12 +86,16 @@ class ProjectServiceTest {
 
         var recommendation = service.generateRecommendation(project.id(), "INDIVIDUAL");
 
+        // Couples share whatever the tier is, so six adults are three rooms and no more. A guest is
+        // served by a flex room the plan can drop under pressure, never by inflating the count.
         assertThat(recommendation.bedrooms()).isEqualTo(3);
         assertThat(recommendation.reasons())
-                .anyMatch(reason -> reason.contains("6 permanent family members share 3 core bedrooms at two per room"))
-                .anyMatch(reason -> reason.contains("preferred flex/guest room"));
+                .anyMatch(reason -> reason.contains("6 permanent residents share 3 core bedrooms at two per room"))
+                .anyMatch(reason -> reason.contains("flex room is planned for the regular guests"));
         assertThat(recommendation.provenance())
-                .containsEntry("method", "deterministic-recommendation-1.2");
+                .containsEntry("method", "deterministic-recommendation-1.3")
+                .containsEntry("programmeProvider", "DETERMINISTIC")
+                .containsEntry("programmeModel", "avas-backend-programme-rules-1.0.0");
     }
 
     @Test

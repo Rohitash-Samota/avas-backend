@@ -26,13 +26,37 @@ Browser
 
 - `auth` owns users, unique usernames, optional email, normalized mobile numbers, roles, permissions, password hashes, JWT issue/validation, rotating hashed refresh tokens and optional Google OAuth account creation. Its unified identifier resolver supports username, unambiguous full name, mobile and email while privileged roles remain admin-provisioned.
 - `security` owns request authentication and validates that `X-Active-Role` is among the user’s assigned roles.
-- `project` owns the planning state machine and native deterministic geometry engine. `SpecificationTier` holds what a finish tier means as a room programme rather than only as a rate, and is read by both the parameter targets a customer is shown and the planner that places the walls. `ApproachParking` resolves where the cars stand once, so the layout and the site plan cannot disagree about it. `LayoutSheetRenderer` draws the customer-facing layout sheet that leads the PDF set.
+- `project` owns the planning state machine and native deterministic geometry engine. `SpecificationTier` holds what a finish tier means as a room programme rather than only as a rate, and is read by both the parameter targets a customer is shown and the planner that places the walls. `ApproachParking` resolves where the cars stand once, so the layout and the site plan cannot disagree about it. `LayoutSheetRenderer` draws the customer-facing layout sheet that leads the PDF set. `LayoutClient` asks AVAS AI where the rooms go; `FloorPlanner` places them when it does not answer.
 - `project.persistence` owns durable project, requirement snapshot, drawing artifact, estimate artifact and append-only project audit entities.
 - `commerce` owns catalog products, server-side price calculation, orders/items, payment sessions/audit, refunds, wallets and wallet transactions.
 - `knowledge` owns versioned planning rules, jurisdictional sources and evidence metadata in MongoDB.
 - `pricing` owns immutable price contributions and decisions, versioned recommendation configuration, controlled model releases, deterministic budget ranges, feedback consent and governance audit. MySQL is authoritative; MongoDB stores de-identified intelligence snapshots.
 
 The geometry engine remains a strong module boundary inside the backend. It can be extracted later without changing its structured geometry contract, while today’s single process provides the requested one-backend deployment and atomic workflow integration.
+
+## Where a home is decided
+
+Planning is three questions, deliberately asked separately, so no single answer can quietly change the others.
+
+| Question | Answered by | Falls back to |
+|---|---|---|
+| What is this household owed? | `/api/v1/plan-programme` | `HouseholdProgramme.deterministic` |
+| What targets and options? | `/api/v1/plan-parameters` | `PlanningParameterSet` rules |
+| Where do the rooms go? | `/api/v1/plan-layout` | `FloorPlanner` |
+
+The programme travels with the layout request, so the remote planner arranges the home the platform already decided on rather than planning one of its own — a service that answered both questions could return a house the customer's estimate was never costed against.
+
+### Corridor and hub
+
+The two layout planners arrange the same programme differently, and the difference is the point.
+
+`FloorPlanner` plans a **double-loaded corridor**: two strips of rooms either side of a 3.75 ft circulation spine. Every room gets a door without walking through another room, and the family spends forty running feet of floor area on somewhere to walk.
+
+AVAS AI plans a **hub**: the entrance opens into the living room, the living runs into the dining, and every other room takes its door off that run — the family lounge doing the same job upstairs. Circulation is still there and is now habitable. It is how the homes this market actually builds are drawn.
+
+The hub guarantee is checked rather than assumed. Every placed room names the space its door opens onto, and a layout is refused — by the AI service and again by `AvasAiLayoutClient` — if that name is not a room sharing at least 2.5 ft of wall with it, if rooms overlap, if any room leaves the buildable envelope, if a room is drawn below the size its type is usable at, or if the reply contains a corridor at all.
+
+A refused layout costs the customer nothing: `FloorPlanner` draws that option instead, and the drawing set is always complete. `avas.ai.layout-enabled` is **false** by default, so a deployment that has not opted in plans every storey locally, with a corridor.
 
 ## Layered backend structure
 

@@ -109,12 +109,23 @@ record ApproachParking(int bays, boolean noseIn, PlotGeometry.Rect area) {
         };
     }
 
-    /** Open ground the building is not standing on, for the site plan to name. */
-    static List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope) {
+    /**
+     * Open ground nothing is standing on, for the site plan to name.
+     *
+     * @param alsoOccupied ground already spoken for beyond the building — the bays, once they are
+     *                     placed. Passing them in is what lets a lawn be drawn <em>beside</em> a
+     *                     driveway: measured against the building alone the front band comes back as
+     *                     one rectangle, and planting it paints grass over the parked cars.
+     */
+    static List<PlotGeometry.Rect> openGround(BuildableEnvelope envelope,
+            PlotGeometry.Rect... alsoOccupied) {
         var built = new ArrayList<PlotGeometry.Rect>();
         built.add(new PlotGeometry.Rect(envelope.footprintX(), envelope.footprintY(),
                 envelope.footprintWidth(), envelope.footprintLength()));
         built.addAll(envelope.extensionZones());
+        for (var occupied : alsoOccupied) {
+            if (occupied != null) built.add(occupied);
+        }
         return PlotGeometry.residualRectangles(envelope.plot().vertices(), built,
                 MINIMUM_OPEN_SIDE, MINIMUM_OPEN_AREA);
     }

@@ -123,6 +123,29 @@ enum SpecificationTier {
         return Math.max(requested, minimumParkingBays);
     }
 
+    /**
+     * True when each child is planned a room rather than a room for each pair of them.
+     *
+     * <p>Sharing is the right assumption for a household buying the shell and the wrong one above
+     * it: a family paying premium or luxury rates for three thousand square feet is not buying two
+     * children a bunk bed. Derived rather than declared because it follows the tier exactly, and the
+     * constructor above is already long enough to hide a transposed flag.</p>
+     */
+    boolean plansRoomPerChild() {
+        return this != STANDARD;
+    }
+
+    /**
+     * True when the plan carries one bedroom beyond the household.
+     *
+     * <p>The ground-floor guest room a luxury duplex is built with — kept for visiting parents, and
+     * for the room a family grows into. Distinct from the flex room a brief naming regular guests
+     * already earns, which is not a bedroom and does not change the count.</p>
+     */
+    boolean plansSpareBedroom() {
+        return this == LUXURY;
+    }
+
     /** True when the front door opens into a hall rather than straight into the living room. */
     boolean entranceFoyer() {
         return entranceFoyer;
